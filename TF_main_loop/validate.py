@@ -12,14 +12,16 @@ from main_utils import compute_chunk_size
 
 # Print prediction hotmap
 def save_heatmap_fn(x, of, y_soft_pred, labels, nclasses, save_basedir,
-                    subset, f, img_summaries, epoch_id,
-                    save_images_on_disk=False, summary_writer=None):
+                    subset, f, epoch_id, summary_writer=None):
     '''Save an image of the probability of each class
 
     Save the image and the heatmap of the probability of each class'''
     import matplotlib.pyplot as plt
     from mpl_toolkits.axes_grid1 import AxesGrid
     from StringIO import StringIO
+
+    cfg = gflags.cfg
+
     num_non_hot = 1 if of is None else 2
     nframes = y_soft_pred.shape[-1]
     fig = plt.figure(dpi=300)
@@ -27,7 +29,7 @@ def save_heatmap_fn(x, of, y_soft_pred, labels, nclasses, save_basedir,
     fig.subplots_adjust(left=0, right=1, bottom=0, top=1)
 
     grid = AxesGrid(fig, 111,
-                    nrows_ncols=(4, max(num_non_hot, nframes//4+1)),
+                    nrows_ncols=(4, max(num_non_hot, nframes // 4+1)),
                     axes_pad=0.25,
                     share_all=True,
                     label_mode="L",
@@ -55,7 +57,7 @@ def save_heatmap_fn(x, of, y_soft_pred, labels, nclasses, save_basedir,
     grid.cbar_axes[0].colorbar(im)
     for cax in grid.cbar_axes:
         cax.toggle_label(False)
-    if save_images_on_disk:
+    if cfg.save_images_on_disk:
         fpath = os.path.join(save_basedir, 'heatmaps', subset, f)
         if not os.path.exists(os.path.dirname(fpath)):
             os.makedirs(os.path.dirname(fpath))
@@ -78,25 +80,20 @@ def save_heatmap_fn(x, of, y_soft_pred, labels, nclasses, save_basedir,
 
 def save_sample_and_fill_sequence_fn(raw_data, of, y_pred, y, cmap, nclasses,
                                      labels, subset, animations, save_basedir,
-                                     f, img_summaries, epoch_id,
-                                     save_raw_predictions=False,
-                                     save_images_on_disk=False,
-                                     summary_writer=None):
+                                     f, epoch_id, summary_writer=None):
     import matplotlib.pyplot as plt
     from mpl_toolkits.axes_grid1 import AxesGrid
     from StringIO import StringIO
+
+    cfg = gflags.cfg
+
     fig = plt.figure(dpi=300)
     # Remove whitespace from around the image
-    fig.subplots_adjust(left=0.3, right=0.7, bottom=0, top=1)
+    fig.subplots_adjust(left=0.1, right=0.9, bottom=0, top=1)
 
     # Set number of rows
     n_rows = 2
-    n_cols = 1
-    if y is not None:
-        n_rows += 1
-    if of is not None:
-        n_rows = 2
-        n_cols = 2
+    n_cols = 2
 
     grid = AxesGrid(fig, 111,
                     nrows_ncols=(n_rows, n_cols),
@@ -121,14 +118,14 @@ def save_sample_and_fill_sequence_fn(raw_data, of, y_pred, y, cmap, nclasses,
     if of is not None:
         im = grid[3].imshow(of, vmin=0, vmax=1, interpolation='nearest')
         grid[3].set_title('Optical flow')
-    # else:
-    #     grid[3].set_visible(False)
+    else:
+        grid[3].set_visible(False)
     # GT
     if y is not None:
         im = grid[1].imshow(y, cmap=cmap, vmin=0, vmax=nclasses)
         grid[1].set_title('Ground truth')
-    # else:
-    #     grid[1].set_visible(False)
+    else:
+        grid[1].set_visible(False)
     # set the colorbar to match GT or prediction
     grid.cbar_axes[0].colorbar(im)
     for cax in grid.cbar_axes:
@@ -138,7 +135,7 @@ def save_sample_and_fill_sequence_fn(raw_data, of, y_pred, y, cmap, nclasses,
 
     # TODO: Labels 45 gradi
 
-    if save_images_on_disk:
+    if cfg.save_images_on_disk:
         fpath = os.path.join(save_basedir, 'segmentations', subset, f)
         if not os.path.exists(os.path.dirname(fpath)):
             os.makedirs(os.path.dirname(fpath))
@@ -159,7 +156,7 @@ def save_sample_and_fill_sequence_fn(raw_data, of, y_pred, y, cmap, nclasses,
     plt.close('all')
 
     # save predictions
-    if save_raw_predictions:
+    if cfg.save_raw_predictions:
         # plt.imshow(y_pred, vmin=0, vmax=nclasses)
         # fpath = os.path.join('samples', model_name, 'predictions',
         #                      f)
@@ -177,11 +174,12 @@ def save_sample_and_fill_sequence_fn(raw_data, of, y_pred, y, cmap, nclasses,
 
 def save_images(this_set, x_batch, y_batch, f_batch, y_pred_batch,
                 y_soft_batch, subset_batch, raw_data_batch, animations,
-                save_basedir, img_summaries, epoch_id, save_heatmap,
-                save_samples, save_raw_predictions, save_images_on_disk,
-                summary_writer):
+                save_basedir, epoch_id, summary_writer):
     import matplotlib as mpl
     import seaborn as sns
+
+    cfg = gflags.cfg
+
     # Initialize variables
     nclasses = this_set.nclasses
     seq_length = this_set.seq_length
@@ -227,19 +225,16 @@ def save_images(this_set, x_batch, y_batch, f_batch, y_pred_batch,
         else:
             of = None
 
-        r_data = x
-
         if x.shape[-1] == 5:
-            r_data = raw_data[seq_length // 2, ..., :3]
+            raw_data = raw_data[seq_length // 2, ..., :3]
 
         # PRINT THE HEATMAP
-        if save_heatmap:
+        if cfg.save_heatmap:
             # do not pass optical flow
-            save_heatmap_fn(r_data, of, y_soft_pred,
+            save_heatmap_fn(raw_data, of, y_soft_pred,
                             labels, nclasses,
                             save_basedir, subset,
-                            f, img_summaries,
-                            epoch_id, save_images_on_disk,
+                            f, epoch_id,
                             summary_writer)
 
         # PRINT THE SAMPLES
@@ -247,21 +242,16 @@ def save_images(this_set, x_batch, y_batch, f_batch, y_pred_batch,
         # y = y.argmax(2)
         # y_pred = y_pred.argmax(2)
 
-        r_data = x
-
         if x.shape[-1] == 5:
-            r_data = raw_data[seq_length // 2]
+            raw_data = raw_data[seq_length // 2]
 
         # Save image and append frame to animations sequence
-        if save_samples:
+        if cfg.save_samples:
 
-            save_sample_and_fill_sequence_fn(r_data, of, y_pred, y, cmap,
+            save_sample_and_fill_sequence_fn(raw_data, of, y_pred, y, cmap,
                                              nclasses, labels, subset,
                                              animations, save_basedir,
-                                             f, img_summaries,
-                                             epoch_id,
-                                             save_raw_predictions,
-                                             save_images_on_disk,
+                                             f, epoch_id,
                                              summary_writer)
         return animations
 
@@ -280,15 +270,8 @@ def validate(placeholders,
              val_summary_op,
              sess,
              epoch_id,
-             which_set='valid',
-             # nuovi params
-             stateful_validation=True,
-             save_samples=True,
-             save_heatmap=True,
-             save_raw_predictions=False,
-             save_images_on_disk=False,
-             save_gifs=False,
-             img_summaries_freq=20):
+             which_set='valid'):
+
         # from rec_conv_deconv import reset_states
         import tensorflow as tf
 
@@ -310,7 +293,6 @@ def validate(placeholders,
         # Begin loop over dataset samples
         eval_cost = 0
         animations = {}
-        img_summaries = []
         pbar = tqdm(total=this_set.nbatches)
         for bidx in range(this_set.nbatches):
             start_val_time = time.time()
@@ -322,7 +304,7 @@ def validate(placeholders,
             raw_data_batch = ret['raw_data']
 
             # Reset the state when we switch to a new video
-            # if stateful_validation:
+            # if cfg.stateful_validation:
             #     if any(s == 'default' for s in subset_batch):
             #         raise RuntimeError(
             #             'For stateful validation, the validation dataset '
@@ -362,8 +344,8 @@ def validate(placeholders,
                 # and get batch pred, mIoU so far, batch loss
                 in_values = [x_in, y_in, split_dim, lab_split_dim]
                 feed_dict = {p: v for (p, v) in zip(placeholders, in_values)}
-                y_pred_batch, y_soft_batch, mIoU, loss, _ = \
-                    sess.run(eval_outs, feed_dict=feed_dict)
+                (y_pred_batch, y_soft_batch, mIoU,
+                 loss, _) = sess.run(eval_outs, feed_dict=feed_dict)
                 summary_str = sess.run(val_summary_op, feed_dict=feed_dict)
                 summary_writer.add_summary(summary_str, epoch_id)
                 summary_writer.flush()
@@ -379,18 +361,14 @@ def validate(placeholders,
                 pbar.update(1)
 
                 # Save image summary for learning visualization
-                if bidx % img_summaries_freq == 0:
+                if bidx % cfg.img_summaries_freq == 0:
 
                     animations = save_images(this_set, x_batch, y_batch,
                                              f_batch, y_pred_batch,
                                              y_soft_batch, subset_batch,
                                              raw_data_batch,
                                              animations, save_basedir,
-                                             img_summaries, epoch_id,
-                                             save_heatmap, save_samples,
-                                             save_raw_predictions,
-                                             save_images_on_disk,
-                                             summary_writer)
+                                             epoch_id, summary_writer)
 
             else:
                 in_values = [x_in, y_in, split_dim, lab_split_dim]
@@ -413,10 +391,10 @@ def validate(placeholders,
             #                          save_raw_predictions)
         # Once all the batches have been processed, save animations
         # save_animations(animations, save_basedir)
-        if save_gifs:
+        if cfg.save_gifs:
             save_animations(animations, save_basedir)
-            
-            
+
+
 def fig2array(fig):
     """Convert a Matplotlib figure to a 4D numpy array
 

@@ -304,14 +304,7 @@ def __run(build_model):
                     val_summary_ops[s],
                     sess,
                     0,
-                    which_set=s,
-                    stateful_validation=cfg.stateful_validation,
-                    save_samples=cfg.save_samples,
-                    save_heatmap=cfg.save_heatmap,
-                    save_raw_predictions=cfg.save_raw_predictions,
-                    save_images_on_disk=cfg.save_images_on_disk,
-                    save_gifs=cfg.save_animations,
-                    img_summaries_freq=cfg.img_summaries_freq)
+                    which_set=s)
 
 
 def build_graph(placeholders, input_shape, optimizer, weight_decay, loss_fn,
@@ -345,6 +338,7 @@ def build_graph(placeholders, input_shape, optimizer, weight_decay, loss_fn,
 
                     net_out = build_model(inputs, is_training)
                     softmax_pred = slim.softmax(net_out)
+                    tower_soft_preds.append(softmax_pred)
 
                     # Prediction
                     sym_pred = tf.argmax(softmax_pred, axis=-1)
@@ -367,7 +361,6 @@ def build_graph(placeholders, input_shape, optimizer, weight_decay, loss_fn,
                     if is_training:
                         grads = optimizer.compute_gradients(loss)
                         tower_grads.append(grads)
-                tower_soft_preds.append(softmax_pred)
 
                     # Print regularization
                     for v in tf.get_collection(
@@ -376,8 +369,6 @@ def build_graph(placeholders, input_shape, optimizer, weight_decay, loss_fn,
 
     # Convert from list of tensors to tensor, and average
     sym_preds = tf.concat(tower_preds, axis=0)
-
-    # Convert from list of Tensors to Tensor
     softmax_preds = tf.concat(tower_soft_preds, axis=0)
 
     # Compute the mean IoU
@@ -575,13 +566,6 @@ def main_loop(placeholders, val_placeholders, train_outs, train_summary_op,
                         sess,
                         epoch_id,
                         which_set=s,
-                        stateful_validation=cfg.stateful_validation,
-                        save_samples=cfg.save_samples,
-                        save_heatmap=cfg.save_heatmap,
-                        save_raw_predictions=cfg.save_raw_predictions,
-                        save_images_on_disk=cfg.save_images_on_disk,
-                        save_gifs=cfg.save_animations,
-                        img_summaries_freq=cfg.img_summaries_freq,
                         model_name='')
 
                 # TODO gsheet

@@ -30,6 +30,6 @@ gflags.DEFINE_bool('save_animations', False, 'Whether to save gif '
 gflags.DEFINE_bool('save_images_on_disk', False, 'If True the images '
                    'will be saved also on disk as well as in '
                    'Tensorboard')
-gflags.DEFINE_integer('img_summaries_freq', 20, 'How often, in terms '
+gflags.DEFINE_integer('img_summaries_freq', 1, 'How often, in terms '
                       'of batches, to save image summaries during '
                       'validation')
