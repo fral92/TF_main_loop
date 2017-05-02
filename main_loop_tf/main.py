@@ -262,7 +262,7 @@ def __run(build_model):
             # No need if we use the Supervisor
 
             # # Initialize the variables (we might restore a subset of them..)
-            # sess.run(init)
+            # cfg.sess.run(init)
 
         # Group global and local init into one op. Could be split into
         # two different ops and passed to `init_op` and `local_init_op`
@@ -282,8 +282,10 @@ def __run(build_model):
             # summary_writer
             save_summaries_secs=120,
             save_model_secs=300)
+        cfg.sv = sv
 
         with sv.managed_session(cfg.supervisor_master, config) as sess:
+            cfg.sess = sess
             if cfg.debug:
                 from tensorflow.python import debug as tf_debug
                 sess = tf_debug.LocalCLIDebugWrapperSession(sess)
@@ -313,7 +315,6 @@ def __run(build_model):
                                    'Dataset': cfg.Dataset,
                                    'dataset_params': cfg.dataset_params,
                                    'valid_params': cfg.valid_params,
-                                   'sess': sess,
                                    'sv': sv}
                 return main_loop(**main_loop_kwags)
             else:
@@ -326,7 +327,6 @@ def __run(build_model):
                         val_placeholders,
                         val_outs,
                         val_summary_ops[s],
-                        sess,
                         0,
                         which_set=s)
 
@@ -520,7 +520,7 @@ def build_graph(placeholders, input_shape, optimizer, weight_decay, loss_fn,
 
 def main_loop(placeholders, val_placeholders, train_outs, train_summary_op,
               val_outs, val_summary_ops, loss_fn, Dataset, dataset_params,
-              valid_params, sess, sv):
+              valid_params, sv):
 
     cfg = gflags.cfg
     max_epochs = cfg.max_epochs
@@ -580,7 +580,7 @@ def main_loop(placeholders, val_placeholders, train_outs, train_summary_op,
 
             # train_op does not return anything, but must be in the
             # outputs to update the gradient
-            loss_value, _ = sess.run(train_outs, feed_dict=feed_dict)
+            loss_value, _ = cfg.sess.run(train_outs, feed_dict=feed_dict)
             t_iter = time() - iter_start
 
             pbar.set_description('Batch {:4d}/{:4d}({:4d}) {:.3f}s (D {:.3f}s)'
@@ -611,7 +611,9 @@ def main_loop(placeholders, val_placeholders, train_outs, train_summary_op,
                         patience_counter >= cfg.patience):
                     estop = True
 
-                sv.summary_computed(sess, summary_str)
+                # Upgrade the summaries
+                summary_str = cfg.sess.run(train_summary_op, feed_dict=feed_dict)
+                sv.summary_computed(cfg.sess, summary_str)
 
                 t_epoch = time() - epoch_start
                 t_save = time() - epoch_end
@@ -634,7 +636,6 @@ def main_loop(placeholders, val_placeholders, train_outs, train_summary_op,
                         val_placeholders,
                         val_outs,
                         val_summary_ops[s],
-                        sess,
                         epoch_id,
                         which_set=s)
 
