@@ -17,7 +17,7 @@ gflags.DEFINE_bool('stateful_validation', False, 'If True the state of '
                    'consecutive)')
 # gflags.DEFINE_integer('BN_mode', 2, 'The batch normalization mode')
 gflags.DEFINE_float('lr', 1e-4, 'Initial Learning Rate')
-gflags.DEFINE_string('lr_decay', None, 'LR Decay schedule')
+gflags.DEFINE_string('lr_decay', 'custom', 'LR Decay schedule')
 gflags.DEFINE_bool('staircase', False, 'Whether to apply decay in a '
                    'discrete staircase, as opposed to continuous, '
                    'fashion.')
@@ -30,7 +30,7 @@ gflags_ext.DEFINE_intlist('lr_boundaries', None,
 gflags_ext.DEFINE_floatlist('lr_values', None, 'List of learning rate')
 
 # Specific params for Exponential Decay
-gflags.DEFINE_integer('decay_steps', None,
+gflags.DEFINE_integer('decay_steps', 939,
                       'How often to decay the LR [in steps]')
 gflags.DEFINE_float('decay_rate', None,
                     'Decay rate at each decay step (0,1)')

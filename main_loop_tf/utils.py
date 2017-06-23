@@ -7,6 +7,7 @@ import gflags
 import matplotlib
 import numpy as np
 import tensorflow as tf
+import loss as loss_impl
 from tensorflow.contrib.layers.python.layers.optimizers import (
     _clip_gradients_by_norm,
     _add_scaled_noise_to_gradients,
@@ -44,7 +45,7 @@ def compute_chunk_size(batch_size, npixels):
 
 
 def apply_loss(labels, net_out, loss_fn, weight_decay, is_training,
-               return_mean_loss=False, mask_voids=True):
+               grads=None, return_mean_loss=False, mask_voids=True):
     '''Applies the user-specified loss function and returns the loss
 
     Note:
@@ -72,12 +73,17 @@ def apply_loss(labels, net_out, loss_fn, weight_decay, is_training,
         if loss_fn is tf.losses.mean_squared_error:
             loss = loss_fn(labels=labels,
                            predictions=tf.reshape(net_out, [-1]))
+        elif loss_fn is loss_impl.dice_coef_loss:
+            loss = loss_fn(labels=labels,
+                           logits=tf.reshape(net_out, [-1]))
         else:
-            loss = loss_fn(multi_class_labels=labels,
+            loss = loss_fn(labels=tf.cast(labels, cfg._FLOATX),
                            logits=tf.reshape(net_out, [-1]))
 
     if is_training:
         loss = apply_l2_penalty(loss, weight_decay)
+        # if cfg.apply_huber_penalty:
+        #   loss = _apply_huber_penalty(loss, grads)
 
     # Return the mean loss (over pixels *and* batches)
     if return_mean_loss:
@@ -85,6 +91,8 @@ def apply_loss(labels, net_out, loss_fn, weight_decay, is_training,
             return tf.reduce_sum(loss) / tf.reduce_sum(mask)
         else:
             return tf.reduce_mean(loss)
+        if cfg.apply_huber_penalty:
+            loss = _apply_huber_penalty(loss, grads)
     else:
         return loss
 
@@ -96,6 +104,19 @@ def apply_l2_penalty(loss, weight_decay):
                                if 'bias' not in v.name])
         loss += l2_penalty * weight_decay
 
+    return loss
+
+
+def _apply_huber_penalty(loss, grads):
+    cfg = gflags.cfg
+    with tf.variable_scope('Huber_penalty'):
+        abs_grads = tf.abs(grads)
+        quadratic = 0.5 * tf.square(abs_grads)
+        linear = cfg.huber_delta * tf.subtract(
+            abs_grads, 0.5 * cfg.huber_delta)
+        huber_loss = cfg.huber_weight_decay * tf.where(
+            abs_grads <= cfg.huber_delta, quadratic, linear)
+        loss += tf.reduce_mean(huber_loss)
     return loss
 
 

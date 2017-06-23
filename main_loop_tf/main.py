@@ -186,6 +186,7 @@ def __parse_config(argv=None):
     dataset_params['divide_by_per_img_std'] = cfg.divide_by_per_img_std
     dataset_params['remove_mean'] = cfg.remove_mean
     dataset_params['divide_by_std'] = cfg.divide_by_std
+    dataset_params.update(cfg.train_extra_params)
     cfg.dataset_params = dataset_params
     cfg.valid_params = deepcopy(cfg.dataset_params)
     cfg.valid_params.update({
@@ -198,6 +199,7 @@ def __parse_config(argv=None):
         'use_threads': False,  # prevent shuffling
         # prevent crop
         'data_augm_kwargs': {'return_optical_flow': cfg.of}})
+    cfg.valid_params.update(cfg.val_extra_params)
     cfg.void_labels = getattr(Dataset, 'void_labels', [])
     cfg.nclasses = Dataset.non_void_nclasses
     cfg.nclasses_w_void = Dataset.nclasses
@@ -214,7 +216,7 @@ def __parse_config(argv=None):
         loss_fn = getattr(losses, cfg.loss_fn)
     except AttributeError:
         try:
-            loss_fn = getattr(nn, cfg.loss_fn.capitalize())
+            loss_fn = getattr(nn, cfg.loss_fn)
         except AttributeError:
             loss_fn = getattr(loss, cfg.loss_fn)
     cfg.loss_fn = loss_fn
@@ -305,6 +307,9 @@ def __run(build_model):
                                              cfg.decay_steps,
                                              cfg.decay_rate,
                                              staircase=cfg.staircase)
+        elif cfg.lr_decay == 'custom':
+            epoch = tf.cast(cfg.global_step / cfg.decay_steps, tf.int32)
+            lr = cfg.lr * tf.pow(0.5, tf.cast(epoch/100, cfg._FLOATX))
         else:
             raise NotImplementedError()
 
@@ -468,6 +473,13 @@ def build_graph(placeholders, input_shape, optimizer, weight_decay, loss_fn,
                 with tf.variable_scope(cfg.model_name, reuse=reuse_variables):
 
                     net_out = build_model(dev_inputs, is_training)
+                    of_map_grad = None
+                    of_preds = net_out[2]
+                    if cfg.apply_huber_penalty:
+                        of_map_grad = net_out[1]
+                        net_out = net_out[0]
+                    else:
+                        net_out = net_out[0]
                     if cfg.task in (cfg.task_names['class'],
                                     cfg.task_names['seg']):
                         softmax_pred = tf.nn.softmax(net_out)
@@ -482,11 +494,16 @@ def build_graph(placeholders, input_shape, optimizer, weight_decay, loss_fn,
                            tf.nn.sparse_softmax_cross_entropy_with_logits):
                             net_out = softmax_pred
                     else:
-                        pred = net_out
+                        sigmoid_pred = tf.sigmoid(net_out)
+                        if (loss_fn is not
+                           tf.nn.sparse_softmax_cross_entropy_with_logits):
+                            net_out = sigmoid_pred
+                        pred = sigmoid_pred
                     tower_preds.append(pred)
 
                     loss = apply_loss(dev_labels, net_out, loss_fn,
                                       weight_decay, is_training,
+                                      of_map_grad,
                                       return_mean_loss=True)
                     tower_losses.append(loss)
                     # Save this GPU's loss summary
@@ -499,7 +516,6 @@ def build_graph(placeholders, input_shape, optimizer, weight_decay, loss_fn,
                         # 1) Compute gradients
                         grads = optimizer.compute_gradients(
                              loss, colocate_gradients_with_ops=True)
-
                         # 2) Process gradients, average them later
 
                         if cfg.grad_noise_decay is None:
@@ -666,7 +682,7 @@ def build_graph(placeholders, input_shape, optimizer, weight_decay, loss_fn,
             return ([preds, avg_tower_loss, train_op], train_summary_op,
                     reset_cm_op)
         elif cfg.task == cfg.task_names['reg']:
-            return ([preds, avg_tower_loss, train_op], train_summary_op, None)
+            return ([of_preds, preds, avg_tower_loss, train_op], train_summary_op, None)
         else:
             raise NotImplementedError()
 
@@ -676,7 +692,7 @@ def build_graph(placeholders, input_shape, optimizer, weight_decay, loss_fn,
                     avg_tower_loss, cm_update_op], val_summary_ops,
                     reset_cm_op)
         elif cfg.task == cfg.task_names['reg']:
-            return ([preds, avg_tower_loss], val_summary_ops, None)
+            return ([of_preds, preds, avg_tower_loss], val_summary_ops, None)
         else:
             raise NotImplementedError()
 
@@ -773,12 +789,12 @@ def main_loop(placeholders, val_placeholders, train_outs, train_summary_op,
             # train_op does not return anything, but must be in the
             # outputs to update the gradient
             if cum_iter % cfg.train_summary_freq == 0:
-                pred_values, loss_value, _, summary_str = cfg.sess.run(
+                of_preds, pred_values, loss_value, _, summary_str = cfg.sess.run(
                     train_outs + [train_summary_op],
                     feed_dict=feed_dict)
                 sv.summary_computed(cfg.sess, summary_str)
             else:
-                pred_values, loss_value, _ = cfg.sess.run(train_outs,
+                of_pred, pred_values, loss_value, _ = cfg.sess.run(train_outs,
                                                           feed_dict=feed_dict)
 
             pbar.set_description('({:3d}) Ep {:d}'.format(cum_iter+1,
@@ -787,16 +803,16 @@ def main_loop(placeholders, val_placeholders, train_outs, train_summary_op,
                               'loss': '{:.3f}'.format(loss_value)})
 
             # Visualize prediction
-            if (cum_iter+1) % 100 == 0:
-                pred_values = np.array(pred_values[:, np.newaxis, ...])
-                for x_b, y_b, pred_v in zip(x_batch, y_batch, pred_values):
-                    for x_frame in x_b:
-                        cv2.imshow("rgb-optflow", x_frame)
-                        cv2.waitKey(100)
-                    cv2.waitKey(500)
-                    cv2.imshow("rgb-optflow", np.concatenate(
-                        [y_b[0], pred_v[0]], axis=1))
-                    cv2.waitKey(500)
+            # if (cum_iter+1) % train.nbatches == 0:
+                # pred_values = np.array(pred_values[:, np.newaxis, ...])
+                # for x_b, y_b, pred_v in zip(x_batch, y_batch, pred_values):
+                    # for x_frame in x_b:
+                    #     cv2.imshow("rgb-optflow", x_frame)
+                    #     cv2.waitKey(100)
+                    # cv2.waitKey(500)
+                    # cv2.imshow("ground_truth-prediction", np.concatenate(
+                    #     [y_b[0], pred_v[0]], axis=1))
+                    # cv2.waitKey(1000)
 
             # for (y_b, p_b) in zip(y_batch, pred_values):
             #     for (gt_frame, pred_frame) in zip(y_b, p_b):

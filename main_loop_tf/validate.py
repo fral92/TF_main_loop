@@ -23,6 +23,7 @@ def validate(placeholders,
              epoch_id=None,
              nthreads=2):
 
+    import cv2
     cfg = gflags.cfg
     if getattr(cfg.valid_params, 'resize_images', False):
         warn('Forcing resize_images to False in evaluation.')
@@ -98,7 +99,7 @@ def validate(placeholders,
         split_dim, lab_split_dim = compute_chunk_size(
             x_batch.shape[0], np.prod(this_set.data_shape[:2]))
 
-        if cfg.seq_length and cfg.seq_length > 1:
+        if cfg.seq_length and y_batch.shape[1] > 1:
             x_in = x_batch
             y_in = y_batch[:, cfg.seq_length // 2, ...]  # 4D: not one-hot
         else:
@@ -110,6 +111,7 @@ def validate(placeholders,
         y_in = y_in.flatten()
         in_values = [x_in, y_in, split_dim, lab_split_dim]
         feed_dict = {p: v for (p, v) in zip(placeholders, in_values)}
+        y_soft_batch = None
 
         if this_set.set_has_GT:
             if cfg.task == cfg.task_names['seg']:
@@ -150,13 +152,13 @@ def validate(placeholders,
                     'mIoU': '{:.3f}'.format(mIoU)})
             elif cfg.task == cfg.task_names['reg']:
                 if cidx % cfg.val_summary_freq == 0:
-                    (y_pred_batch, loss, _, summary_str) = cfg.sess.run(
+                    (of_pred, y_pred_batch, loss, summary_str) = cfg.sess.run(
                      eval_outs + [val_summary_op], feed_dict=feed_dict)
 
                     cfg.sv.summary_computed(cfg.sess, summary_str,
                                             global_step=cidx)
                 else:
-                    (y_pred_batch, loss, _) = cfg.sess.run(
+                    (y_pred_batch, loss) = cfg.sess.run(
                         eval_outs, feed_dict=feed_dict)
                 tot_loss += loss
 
@@ -174,16 +176,29 @@ def validate(placeholders,
                     eval_outs[:2] + [val_summary_op], feed_dict=feed_dict)
                 mIoU = 0
             elif cfg.task == cfg.task_names['reg']:
-                y_pred_batch, summary_str = cfg.sess.run(
-                    eval_outs[:2] + [val_summary_op], feed_dict=feed_dict)
+                of_pred, y_pred_batch, loss, summary_str = cfg.sess.run(
+                    eval_outs[:3] + [val_summary_op], feed_dict=feed_dict)
             elif cfg.task == cfg.task_names['class']:
                 pass
             else:
                 raise NotImplementedError()
-
-            summary_str = cfg.sess.run(val_summary_op, feed_dict=feed_dict)
-            cfg.sv.summary_computed(cfg.sess, summary_str,
-                                    global_step=cidx)
+            if cidx % cfg.val_summary_freq == 0:
+                cfg.sv.summary_computed(cfg.sess, summary_str,
+                                        global_step=cidx)
+            print(of_pred)
+            print(np.max(of_pred))
+            print(np.min(of_pred))
+            # Show OF
+            hsv = np.zeros(of_pred.shape[:3] + tuple([3]))
+            hsv[...,1] = 255
+            mag, ang = cv2.cartToPolar(of_pred[...,0], of_pred[...,1])
+            hsv[...,0] = ang*180/np.pi/2
+            hsv[...,2] = cv2.normalize(mag,None,0,255,cv2.NORM_MINMAX)
+            hsv = np.squeeze(hsv)
+            hsv_resized = cv2.resize(hsv, (128, 128))
+            # rgb = cv2.cvtColor(hsv,cv2.COLOR_HSV2BGR)
+            cv2.imshow('frame2', hsv_resized*1000)
+            cv2.waitKey(1000)
 
         pbar.update(1)
         # TODO there is no guarantee that this will be processed
@@ -226,7 +241,7 @@ def validate(placeholders,
     img_queue.join()  # Wait for the threads to be done
     this_set.finish()  # Close the dataset
 
-    return metric
+    return 1
 
 
 def write_IoUs_summaries(IoUs, step=None, class_labels=[]):
@@ -267,44 +282,61 @@ def save_images(img_queue, save_basedir, sentinel):
 
             cfg = gflags.cfg
 
-            # Initialize variables
+            # Initialize variable
             nclasses = this_set.nclasses
             seq_length = this_set.seq_length
-            try:
-                cmap = this_set.cmap
-            except AttributeError:
-                cmap = [el for el in sns.hls_palette(this_set.nclasses)]
-            cmap = mpl.colors.ListedColormap(cmap)
-            labels = this_set.mask_labels
+            cmap = None
+            labels = None
+            if cfg.task is not cfg.task_names['reg']:
+                try:
+                    cmap = this_set.cmap
+                except AttributeError:
+                    cmap = [el for el in sns.hls_palette(this_set.nclasses)]
+                cmap = mpl.colors.ListedColormap(cmap)
+                labels = this_set.mask_labels
 
-            assert len(x_batch) == len(y_batch) == len(f_batch) == \
-                len(y_pred_batch) == len(y_soft_batch) == len(raw_data_batch)
+            if y_soft_batch is None:
+                zip_list = (x_batch, y_batch, f_batch, y_pred_batch,
+                            raw_data_batch)
+            else:
+                zip_list = (x_batch, y_batch, f_batch, y_pred_batch,
+                            y_soft_batch, raw_data_batch)
+
+            # assert len(x_batch) == len(y_batch) == len(f_batch) == \
+            #     len(y_pred_batch) == len(y_soft_batch) == len(raw_data_batch)
             # Save samples, iterating over each element of the batch
-            for x, y, f, y_pred, y_soft_pred, raw_data in zip(
-                    x_batch,
-                    y_batch,
-                    f_batch,
-                    y_pred_batch,
-                    y_soft_batch,
-                    raw_data_batch):
+            for el in zip(*zip_list):
+                if y_soft_batch is None:
+                    (x, y, f, y_pred, raw_data) = el
+                else:
+                    (x, y, f, y_pred, y_soft_pred, raw_data) = el
                 # y = np.expand_dims(y, -1)
                 # y_pred = np.expand_dims(y_pred, -1)
-                if x.shape[-1] == 5:
-                    # Keep only middle frame name and save as png
+                which_frame = 0
+                if len(x.shape) == 4:
                     seq_length = x_batch.shape[1]
-                    f = f[seq_length // 2]
-                    f = f[:-4]  # strip .jpg
-                    f = f + '.png'
+                    if cfg.output_frame == 'middle':
+                        which_frame = seq_length // 2
+                    elif cfg.output_frame == 'last':
+                        which_frame = seq_length - 1
+                    # Keep only middle frame name and save as png
+                    f = f[which_frame]
+                    if not isinstance(f, int):
+                        f = f[:-4]  # strip .jpg
+                        f = f + '.png'
+                    else:
+                        f = str(f) + '.png'
                 else:
                     f = f[0]
                     f = f[:-4]
                     f = f + '.png'
                 # Retrieve the optical flow channels
                 if x.shape[-1] == 5:
-                    of = x[seq_length // 2, ..., 3:]
+
+                    of = x[which_frame, ..., 3:]
                     # ang, mag = of
                     import cv2
-                    hsv = np.zeros_like(x[seq_length // 2, ..., :3],
+                    hsv = np.zeros_like(x[which_frame, ..., :3],
                                         dtype='uint8')
                     hsv[..., 0] = of[..., 0] * 255
                     hsv[..., 1] = 255
@@ -316,15 +348,16 @@ def save_images(img_queue, save_basedir, sentinel):
 
                 if raw_data.ndim == 4:
                     # Show only the middle frame
-                    heat_map_in = raw_data[seq_length // 2, ..., :3]
+                    heat_map_in = raw_data[which_frame, ..., :3]
                 else:
                     heat_map_in = raw_data
 
                 # PRINT THE HEATMAP
-                if cfg.show_heatmaps_summaries:
-                    # do not pass optical flow
-                    save_heatmap_fn(heat_map_in, of, y_soft_pred, labels,
-                                    nclasses, save_basedir, subset, f, bidx)
+                if y_soft_batch is not None:
+                    if cfg.show_heatmaps_summaries:
+                        # do not pass optical flow
+                        save_heatmap_fn(heat_map_in, of, y_soft_pred, labels,
+                                        nclasses, save_basedir, subset, f, bidx)
 
                 # PRINT THE SAMPLES
                 # Keep most likely prediction only
@@ -335,8 +368,11 @@ def save_images(img_queue, save_basedir, sentinel):
                 if (cfg.save_gif_frames_on_disk or
                         cfg.show_samples_summaries or cfg.save_gif_on_disk):
                     if raw_data.ndim == 4:
-                        sample_in = raw_data[seq_length // 2]
-                        y_in = y[seq_length // 2]
+                        sample_in = raw_data[which_frame]
+                        if y.shape[0] > 1:
+                            y_in = y[which_frame]
+                        else:
+                            y_in = y[0]
                     else:
                         sample_in = raw_data
                         y_in = y
@@ -437,7 +473,7 @@ def save_samples_and_animations(raw_data, of, y_pred, y, cmap, nclasses,
 
     fig = plt.figure(dpi=300)
     # Remove whitespace from around the image
-    fig.subplots_adjust(left=0.1, right=0.9, bottom=0, top=1)
+    fig.subplots_adjust(left=0.1, right=0.9, bottom=0, top=0.9)
 
     # Set number of rows
     n_rows = 2
@@ -456,10 +492,19 @@ def save_samples_and_animations(raw_data, of, y_pred, y, cmap, nclasses,
         ax.set_yticks([sh[0]])
 
     # image
-    grid[0].imshow(raw_data)
+    if raw_data.shape[-1] == 1:
+        grid[0].imshow(np.squeeze(raw_data), cmap='gray')
+    else:
+        grid[0].imshow(raw_data)
     grid[0].set_title('Image')
     # prediction
-    grid[2].imshow(y_pred, cmap=cmap, vmin=0, vmax=nclasses)
+    if cfg.task == cfg.task_names['reg']:
+        if y_pred.shape[-1] == 1:
+            grid[2].imshow(np.squeeze(y_pred))
+        else:
+            grid[2].imshow(y_pred)
+    else:
+        grid[2].imshow(y_pred, cmap=cmap, vmin=0, vmax=nclasses)
     grid[2].set_title('Prediction')
     im = None
     # OF
@@ -470,16 +515,23 @@ def save_samples_and_animations(raw_data, of, y_pred, y, cmap, nclasses,
         grid[3].set_visible(False)
     # GT
     if y is not None:
-        im = grid[1].imshow(y, cmap=cmap, vmin=0, vmax=nclasses)
+        if cfg.task == cfg.task_names['reg']:
+            if y.shape[-1] == 1:
+                im = grid[1].imshow(np.squeeze(y), cmap='gray')
+            else:
+                im = grid[1].imshow(y)
+        else:
+            im = grid[1].imshow(y, cmap=cmap, vmin=0, vmax=nclasses)
         grid[1].set_title('Ground truth')
     else:
         grid[1].set_visible(False)
     # set the colorbar to match GT or prediction
-    grid.cbar_axes[0].colorbar(im)
-    for cax in grid.cbar_axes:
-        cax.toggle_label(True)  # show labels
-        cax.set_yticks(np.arange(len(labels)) + 0.5)
-        cax.set_yticklabels(labels)
+    if cfg.task != cfg.task_names['reg']:
+        grid.cbar_axes[0].colorbar(im)
+        for cax in grid.cbar_axes:
+            cax.toggle_label(True)  # show labels
+            cax.set_yticks(np.arange(len(labels)) + 0.5)
+            cax.set_yticklabels(labels)
 
     # TODO: Labels 45 gradi
 
@@ -494,8 +546,12 @@ def save_samples_and_animations(raw_data, of, y_pred, y, cmap, nclasses,
         plt.imsave(sio, fig2array(fig), format='png')
         # size = fig.get_size_inches()*fig.dpi  # size in pixels
         seq_img = tf.Summary.Image(encoded_image_string=sio.getvalue())
-        seq_img_summary = tf.Summary.Value(tag='Predictions/' + subset,
-                                           image=seq_img)
+        if subset.size == 0:
+            seq_img_summary = tf.Summary.Value(tag='Predictions/',
+                                               image=seq_img)
+        else:
+            seq_img_summary = tf.Summary.Value(tag='Predictions/' + subset,
+                                               image=seq_img)
 
         summary_str = tf.Summary(value=[seq_img_summary])
         cfg.sv.summary_computed(cfg.sess, summary_str, global_step=bidx)
