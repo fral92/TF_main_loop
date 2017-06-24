@@ -477,11 +477,12 @@ def build_graph(placeholders, input_shape, optimizer, weight_decay, loss_fn,
 
                     net_out = build_model(dev_inputs, is_training)
                     of_map_grad = None
-                    tower_of_preds.append(net_out[2])
                     if cfg.apply_huber_penalty:
+                        tower_of_preds.append(net_out[2])
                         of_map_grad = net_out[1]
                         net_out = net_out[0]
                     else:
+                        tower_of_preds.append(net_out[1])
                         net_out = net_out[0]
                     if cfg.task in (cfg.task_names['class'],
                                     cfg.task_names['seg']):
