@@ -265,14 +265,16 @@ def __run(build_model):
     tf.logging.info("Building the model ...")
     # with graph:
     with tf.Graph().as_default() as graph:
+        # Set random seed
+        tf.set_random_seed(1250)
         cfg.global_step = tf.Variable(0, trainable=False, name='global_step',
                                       dtype='int32')
         inputs = tf.placeholder(shape=cfg.input_shape,
                                 dtype=cfg._FLOATX, name='inputs')
         val_inputs = tf.placeholder(shape=cfg.val_input_shape,
                                     dtype=cfg._FLOATX, name='val_inputs')
-        labels = tf.placeholder(shape=[None], dtype='int32', name='labels')
-
+        labels = tf.placeholder(shape=[None], dtype='int32',
+                                name='labels')
         prev_err = tf.placeholder(shape=(),
                                   dtype=cfg._FLOATX, name='prev_err')
         if cfg.lr_decay is None:
@@ -456,6 +458,7 @@ def build_graph(placeholders, input_shape, optimizer, weight_decay, loss_fn,
     tower_preds = []
     tower_soft_preds = []
     tower_losses = []
+    tower_of_preds = []
     summaries = {}
     if is_training:
         summaries['training'] = tf.get_collection_ref(key='train_summaries')
@@ -474,7 +477,7 @@ def build_graph(placeholders, input_shape, optimizer, weight_decay, loss_fn,
 
                     net_out = build_model(dev_inputs, is_training)
                     of_map_grad = None
-                    of_preds = net_out[2]
+                    tower_of_preds.append(net_out[2])
                     if cfg.apply_huber_penalty:
                         of_map_grad = net_out[1]
                         net_out = net_out[0]
@@ -496,9 +499,12 @@ def build_graph(placeholders, input_shape, optimizer, weight_decay, loss_fn,
                     else:
                         sigmoid_pred = tf.sigmoid(net_out)
                         if (loss_fn is not
-                           tf.nn.sparse_softmax_cross_entropy_with_logits):
+                           tf.nn.sigmoid_cross_entropy_with_logits):
                             net_out = sigmoid_pred
                         pred = sigmoid_pred
+                        # pred = tf.cast(tf.divide(pred, 0.5), tf.int32)
+                        # pred = tf.cast(pred, cfg._FLOATX)
+                        # pred = tf.argmax(pred, axsi=-1)
                     tower_preds.append(pred)
 
                     loss = apply_loss(dev_labels, net_out, loss_fn,
@@ -603,6 +609,7 @@ def build_graph(placeholders, input_shape, optimizer, weight_decay, loss_fn,
 
     # Convert from list of tensors to tensor, and average
     preds = tf.concat(tower_preds, axis=0)
+    of_preds = tf.concat(tower_of_preds, axis=0)
 
     if cfg.task == cfg.task_names['seg']:
         softmax_preds = tf.concat(tower_soft_preds, axis=0)
@@ -682,7 +689,7 @@ def build_graph(placeholders, input_shape, optimizer, weight_decay, loss_fn,
             return ([preds, avg_tower_loss, train_op], train_summary_op,
                     reset_cm_op)
         elif cfg.task == cfg.task_names['reg']:
-            return ([of_preds, preds, avg_tower_loss, train_op], train_summary_op, None)
+            return ([preds, avg_tower_loss, train_op], train_summary_op, None)
         else:
             raise NotImplementedError()
 
@@ -789,12 +796,12 @@ def main_loop(placeholders, val_placeholders, train_outs, train_summary_op,
             # train_op does not return anything, but must be in the
             # outputs to update the gradient
             if cum_iter % cfg.train_summary_freq == 0:
-                of_preds, pred_values, loss_value, _, summary_str = cfg.sess.run(
+                pred_values, loss_value, _, summary_str = cfg.sess.run(
                     train_outs + [train_summary_op],
                     feed_dict=feed_dict)
                 sv.summary_computed(cfg.sess, summary_str)
             else:
-                of_pred, pred_values, loss_value, _ = cfg.sess.run(train_outs,
+                pred_values, loss_value, _ = cfg.sess.run(train_outs,
                                                           feed_dict=feed_dict)
 
             pbar.set_description('({:3d}) Ep {:d}'.format(cum_iter+1,

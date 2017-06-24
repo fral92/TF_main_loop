@@ -152,7 +152,7 @@ def validate(placeholders,
                     'mIoU': '{:.3f}'.format(mIoU)})
             elif cfg.task == cfg.task_names['reg']:
                 if cidx % cfg.val_summary_freq == 0:
-                    (of_pred, y_pred_batch, loss, summary_str) = cfg.sess.run(
+                    (of_preds, y_pred_batch, loss, summary_str) = cfg.sess.run(
                      eval_outs + [val_summary_op], feed_dict=feed_dict)
 
                     cfg.sv.summary_computed(cfg.sess, summary_str,
@@ -176,7 +176,7 @@ def validate(placeholders,
                     eval_outs[:2] + [val_summary_op], feed_dict=feed_dict)
                 mIoU = 0
             elif cfg.task == cfg.task_names['reg']:
-                of_pred, y_pred_batch, loss, summary_str = cfg.sess.run(
+                of_preds, y_pred_batch, loss, summary_str = cfg.sess.run(
                     eval_outs[:3] + [val_summary_op], feed_dict=feed_dict)
             elif cfg.task == cfg.task_names['class']:
                 pass
@@ -185,20 +185,9 @@ def validate(placeholders,
             if cidx % cfg.val_summary_freq == 0:
                 cfg.sv.summary_computed(cfg.sess, summary_str,
                                         global_step=cidx)
-            print(of_pred)
-            print(np.max(of_pred))
-            print(np.min(of_pred))
-            # Show OF
-            hsv = np.zeros(of_pred.shape[:3] + tuple([3]))
-            hsv[...,1] = 255
-            mag, ang = cv2.cartToPolar(of_pred[...,0], of_pred[...,1])
-            hsv[...,0] = ang*180/np.pi/2
-            hsv[...,2] = cv2.normalize(mag,None,0,255,cv2.NORM_MINMAX)
-            hsv = np.squeeze(hsv)
-            hsv_resized = cv2.resize(hsv, (128, 128))
-            # rgb = cv2.cvtColor(hsv,cv2.COLOR_HSV2BGR)
-            cv2.imshow('frame2', hsv_resized*1000)
-            cv2.waitKey(1000)
+            print(y_pred_batch)
+            print(np.max(y_pred_batch))
+            print(np.min(y_pred_batch))
 
         pbar.update(1)
         # TODO there is no guarantee that this will be processed
@@ -207,7 +196,7 @@ def validate(placeholders,
         #
         # Save image summary for learning visualization
         img_queue.put((cidx, this_set, x_batch, y_batch, f_batch, subset,
-                       raw_data_batch, y_pred_batch, y_soft_batch))
+                       raw_data_batch, of_preds, y_pred_batch, y_soft_batch))
     pbar.close()
 
     # Kill the threads
@@ -265,6 +254,7 @@ def write_IoUs_summaries(IoUs, step=None, class_labels=[]):
 def save_images(img_queue, save_basedir, sentinel):
     import matplotlib as mpl
     import seaborn as sns
+    import cv2
     cfg = gflags.cfg
 
     while True:
@@ -278,7 +268,7 @@ def save_images(img_queue, save_basedir, sentinel):
                 img_queue.task_done()
                 break
             (bidx, this_set, x_batch, y_batch, f_batch, subset,
-             raw_data_batch, y_pred_batch, y_soft_batch) = img
+             raw_data_batch, of_preds, y_pred_batch, y_soft_batch) = img
 
             cfg = gflags.cfg
 
@@ -296,10 +286,10 @@ def save_images(img_queue, save_basedir, sentinel):
                 labels = this_set.mask_labels
 
             if y_soft_batch is None:
-                zip_list = (x_batch, y_batch, f_batch, y_pred_batch,
+                zip_list = (x_batch, y_batch, f_batch, of_preds, y_pred_batch,
                             raw_data_batch)
             else:
-                zip_list = (x_batch, y_batch, f_batch, y_pred_batch,
+                zip_list = (x_batch, y_batch, f_batch, of_preds, y_pred_batch,
                             y_soft_batch, raw_data_batch)
 
             # assert len(x_batch) == len(y_batch) == len(f_batch) == \
@@ -307,9 +297,9 @@ def save_images(img_queue, save_basedir, sentinel):
             # Save samples, iterating over each element of the batch
             for el in zip(*zip_list):
                 if y_soft_batch is None:
-                    (x, y, f, y_pred, raw_data) = el
+                    (x, y, f, of_pred, y_pred, raw_data) = el
                 else:
-                    (x, y, f, y_pred, y_soft_pred, raw_data) = el
+                    (x, y, f, of_pred, y_pred, y_soft_pred, raw_data) = el
                 # y = np.expand_dims(y, -1)
                 # y_pred = np.expand_dims(y_pred, -1)
                 which_frame = 0
@@ -346,6 +336,20 @@ def save_images(img_queue, save_basedir, sentinel):
                 else:
                     of = None
 
+                if of_pred is not None:
+                    # Show OF
+                    hsv = np.zeros(of_pred.shape[:2] + tuple([3]))
+                    hsv[..., 1] = 255
+                    mag, ang = cv2.cartToPolar(of_pred[..., 0],
+                                               of_pred[..., 1])
+                    hsv[..., 0] = ang*180/np.pi/2
+                    hsv[..., 2] = cv2.normalize(mag, None, 0, 255,
+                                                cv2.NORM_MINMAX)
+                    hsv = np.squeeze(hsv)
+                    hsv_resized = cv2.resize(hsv, (64, 64))
+                    of_rgb = cv2.cvtColor(hsv_resized.astype(np.uint8),
+                                          cv2.COLOR_HSV2BGR)
+
                 if raw_data.ndim == 4:
                     # Show only the middle frame
                     heat_map_in = raw_data[which_frame, ..., :3]
@@ -376,9 +380,9 @@ def save_images(img_queue, save_basedir, sentinel):
                     else:
                         sample_in = raw_data
                         y_in = y
-                    save_samples_and_animations(sample_in, of, y_pred, y_in,
-                                                cmap, nclasses, labels, subset,
-                                                save_basedir, f, bidx)
+                    save_samples_and_animations(sample_in, of, of_rgb, y_pred,
+                                                y_in, cmap, nclasses, labels,
+                                                subset, save_basedir, f, bidx)
             img_queue.task_done()
         except Queue.Empty:
             continue
@@ -463,7 +467,7 @@ def save_heatmap_fn(x, of, y_soft_pred, labels, nclasses, save_basedir, subset,
     plt.close('all')
 
 
-def save_samples_and_animations(raw_data, of, y_pred, y, cmap, nclasses,
+def save_samples_and_animations(raw_data, of, of_pred, y_pred, y, cmap, nclasses,
                                 labels, subset, save_basedir, f, bidx):
     import matplotlib.pyplot as plt
     from mpl_toolkits.axes_grid1 import AxesGrid
@@ -500,16 +504,16 @@ def save_samples_and_animations(raw_data, of, y_pred, y, cmap, nclasses,
     # prediction
     if cfg.task == cfg.task_names['reg']:
         if y_pred.shape[-1] == 1:
-            grid[2].imshow(np.squeeze(y_pred))
+            grid[2].imshow(np.squeeze(y_pred), cmap='gray')
         else:
-            grid[2].imshow(y_pred)
+            grid[2].imshow(y_pred, cmap='gray')
     else:
         grid[2].imshow(y_pred, cmap=cmap, vmin=0, vmax=nclasses)
     grid[2].set_title('Prediction')
     im = None
     # OF
-    if of is not None:
-        im = grid[3].imshow(of, vmin=0, vmax=1, interpolation='nearest')
+    if of_pred is not None:
+        im = grid[3].imshow(of_pred)
         grid[3].set_title('Optical flow')
     else:
         grid[3].set_visible(False)

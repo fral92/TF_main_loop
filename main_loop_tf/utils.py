@@ -76,7 +76,7 @@ def apply_loss(labels, net_out, loss_fn, weight_decay, is_training,
         elif loss_fn is loss_impl.dice_coef_loss:
             loss = loss_fn(labels=labels,
                            logits=tf.reshape(net_out, [-1]))
-        else:
+        elif loss_fn is tf.nn.sigmoid_cross_entropy_with_logits:
             loss = loss_fn(labels=tf.cast(labels, cfg._FLOATX),
                            logits=tf.reshape(net_out, [-1]))
 
