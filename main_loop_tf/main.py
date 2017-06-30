@@ -477,7 +477,8 @@ def build_graph(placeholders, input_shape, optimizer, weight_decay, loss_fn,
 
                     net_out = build_model(dev_inputs, is_training)
                     of_map_grad = None
-                    if cfg.apply_huber_penalty:
+                    if (cfg.apply_huber_penalty and
+                            cfg.huber_loss_type == 'custom'):
                         tower_of_preds.append(net_out[2])
                         of_map_grad = net_out[1]
                         net_out = net_out[0]
@@ -502,7 +503,9 @@ def build_graph(placeholders, input_shape, optimizer, weight_decay, loss_fn,
                         if (loss_fn is not
                            tf.nn.sigmoid_cross_entropy_with_logits):
                             net_out = sigmoid_pred
-                        pred = sigmoid_pred
+                        zeros = tf.zeros_like(sigmoid_pred)
+                        ones = tf.ones_like(sigmoid_pred)
+                        pred = tf.where(sigmoid_pred >= 0.5, ones, zeros)
                         # pred = tf.cast(tf.divide(pred, 0.5), tf.int32)
                         # pred = tf.cast(pred, cfg._FLOATX)
                         # pred = tf.argmax(pred, axsi=-1)
@@ -743,7 +746,7 @@ def main_loop(placeholders, val_placeholders, train_outs, train_summary_op,
     if cfg.debug_of:
         cv2.namedWindow("rgb-optflow")
 
-    cv2.namedWindow("rgb-optflow")
+    # cv2.namedWindow("rgb-optflow")
     while not sv.should_stop():
         epoch_id = cum_iter // train.nbatches
         pbar = tqdm(total=train.nbatches,

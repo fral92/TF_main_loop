@@ -14,6 +14,7 @@ import tensorflow as tf
 
 from utils import compute_chunk_size, fig2array
 
+from flowToColor import flowToColor
 
 def validate(placeholders,
              eval_outs,
@@ -325,7 +326,6 @@ def save_images(img_queue, save_basedir, sentinel):
 
                     of = x[which_frame, ..., 3:]
                     # ang, mag = of
-                    import cv2
                     hsv = np.zeros_like(x[which_frame, ..., :3],
                                         dtype='uint8')
                     hsv[..., 0] = of[..., 0] * 255
@@ -338,18 +338,20 @@ def save_images(img_queue, save_basedir, sentinel):
 
                 if of_pred is not None:
                     # Show OF
-                    hsv = np.zeros(of_pred.shape[:2] + tuple([3]))
-                    hsv[..., 1] = 255
-                    mag, ang = cv2.cartToPolar(of_pred[..., 0],
-                                               of_pred[..., 1])
-                    hsv[..., 0] = ang*180/np.pi/2
-                    hsv[..., 2] = cv2.normalize(mag, None, 0, 255,
-                                                cv2.NORM_MINMAX)
-                    hsv = np.squeeze(hsv)
-                    hsv_resized = cv2.resize(hsv, (64, 64))
-                    of_rgb = cv2.cvtColor(hsv_resized.astype(np.uint8),
-                                          cv2.COLOR_HSV2BGR)
-
+                    # hsv = np.zeros(of_pred.shape[:2] + tuple([3]))
+                    # hsv[..., 1] = 255
+                    # mag, ang = cv2.cartToPolar(of_pred[..., 0],
+                    #                            of_pred[..., 1])
+                    # hsv[..., 0] = ang*180/np.pi/2
+                    # hsv[..., 2] = cv2.normalize(mag, None, 0, 255,
+                    #                             cv2.NORM_MINMAX)
+                    # hsv = np.squeeze(hsv)
+                    # hsv_resized = cv2.resize(hsv, (64, 64))
+                    # of_rgb = cv2.cvtColor(hsv_resized.astype(np.uint8),
+                    #                       cv2.COLOR_HSV2BGR)
+                    of_rgb = flowToColor(of_pred)
+                    of_rgb = cv2.resize(of_rgb, (y_pred.shape[0],
+                                                 y_pred.shape[1]))
                 if raw_data.ndim == 4:
                     # Show only the middle frame
                     heat_map_in = raw_data[which_frame, ..., :3]
@@ -504,6 +506,7 @@ def save_samples_and_animations(raw_data, of, of_pred, y_pred, y, cmap, nclasses
     # prediction
     if cfg.task == cfg.task_names['reg']:
         if y_pred.shape[-1] == 1:
+            y_pred = (y_pred * 255.).astype(np.uint8)
             grid[2].imshow(np.squeeze(y_pred), cmap='gray')
         else:
             grid[2].imshow(y_pred, cmap='gray')

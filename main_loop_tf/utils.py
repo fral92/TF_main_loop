@@ -92,7 +92,13 @@ def apply_loss(labels, net_out, loss_fn, weight_decay, is_training,
         else:
             return tf.reduce_mean(loss)
         if cfg.apply_huber_penalty:
-            loss = _apply_huber_penalty(loss, grads)
+            if cfg.huber_loss_type == 'custom':
+                loss = _apply_huber_penalty(loss, grads)
+            else:
+                predictions = tf.reshape(tf.sigmoid(net_out), [-1])
+                loss += tf.reduce_mean(tf.losses.huber_loss(
+                    labels, predictions, cfg.huber_weight_decay,
+                    cfg.huber_delta))
     else:
         return loss
 
