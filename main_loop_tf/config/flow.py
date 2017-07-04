@@ -17,6 +17,10 @@ gflags.DEFINE_integer('patience', 100, 'The number of validation with no '
                       lower_bound=1)
 gflags.DEFINE_bool('do_validation_only', False, 'If True does one round '
                    'of validation')
+gflags.DEFINE_string('task', 'regression',
+                     '[classification/segmentation/regression]')
+gflags.DEFINE_bool('of_prediction', False, 'True if the running '
+                   'model performs also an optical flow prediction ')
 # Other flags we might want to define (see also config/misc.py):
 # early_stop_metric='subsets_avg_val_jaccard_fg',
 # early_stop_strategy='max',

@@ -84,6 +84,12 @@ def __parse_config(argv=None):
     cfg.__dict__ = {k: el.value for (k, el) in fl.iteritems()}
     gflags.cfg = cfg
 
+    cfg.task_names = dict({'reg': 'regression',
+                           'seg': 'segmentation',
+                           'class': 'classification'})
+    assert cfg.task in cfg.task_names.values(), (
+        'Only regression/classification/segmentation are available')
+
     # ============ gsheet
     # Save params for log, excluding non JSONable and not interesting objects
     exclude_list = ['checkpoints_dir', 'checkpoints_to_keep', 'dataset',
@@ -144,8 +150,12 @@ def __parse_config(argv=None):
     try:
         Dataset = getattr(dataset_loaders, cfg.dataset)
     except AttributeError:
-        Dataset = getattr(dataset_loaders, cfg.dataset.capitalize() +
-                          'Dataset')
+        try:
+            Dataset = getattr(dataset_loaders, cfg.dataset.capitalize() +
+                              'Dataset')
+        except AttributeError:
+            Dataset = getattr(dataset_loaders, cfg.dataset + 'Dataset')
+
     cfg.Dataset = Dataset
     dataset_params = {}
     dataset_params['batch_size'] = cfg.batch_size * cfg.num_splits
@@ -185,6 +195,8 @@ def __parse_config(argv=None):
     dataset_params['divide_by_per_img_std'] = cfg.divide_by_per_img_std
     dataset_params['remove_mean'] = cfg.remove_mean
     dataset_params['divide_by_std'] = cfg.divide_by_std
+    # Add dataset extra parameters specific for each dataset
+    dataset_params.update(cfg.train_extra_params)
     cfg.dataset_params = dataset_params
     cfg.valid_params = deepcopy(cfg.dataset_params)
     cfg.valid_params.update({
@@ -198,6 +210,8 @@ def __parse_config(argv=None):
         'use_threads': False,  # prevent shuffling
         # prevent crop
         'data_augm_kwargs': {'return_optical_flow': cfg.of}})
+    # Add dataset extra parameters specific for each dataset
+    cfg.valid_params.update(cfg.val_extra_params)
     cfg.void_labels = getattr(Dataset, 'void_labels', [])
     cfg.nclasses = Dataset.non_void_nclasses
     cfg.nclasses_w_void = Dataset.nclasses
@@ -334,6 +348,9 @@ def __run(build_model):
                                              cfg.decay_steps,
                                              cfg.decay_rate,
                                              staircase=cfg.staircase)
+        elif cfg.lr_decay == 'custom':
+            epoch = tf.cast(cfg.global_step / cfg.decay_steps, tf.int32)
+            lr = cfg.lr * tf.pow(0.5, tf.cast(epoch / 50, cfg._FLOATX))
         else:
             raise NotImplementedError()
         cfg.Optimizer = cfg.Optimizer(learning_rate=lr, **cfg.optimizer_params)
@@ -488,6 +505,7 @@ def build_graph(placeholders, input_shape, build_model, which_set):
     tower_preds = []
     tower_soft_preds = []
     tower_losses = []
+    tower_of_preds = []
     summaries = []
 
     # Process backwards, so that the i-th summary includes all the summaries
@@ -504,18 +522,39 @@ def build_graph(placeholders, input_shape, build_model, which_set):
             reuse_variables = True
 
             # Model output, softmax and prediction
-            net_out = build_model(dev_inputs, is_training)
-            softmax_pred = slim.softmax(net_out)
-            tower_soft_preds.append(softmax_pred)
-            pred = tf.argmax(softmax_pred, axis=-1)
+            if not cfg.of_prediction:
+                net_out = build_model(dev_inputs, is_training)
+            else:
+                model_output = build_model(dev_inputs, is_training)
+                net_out = model_output[0]
+                of_pred = model_output[1]
+                tower_of_preds.append(of_pred)
+
+            if cfg.task in (cfg.task_names['class'],
+                            cfg.task_names['seg']):
+                softmax_pred = slim.softmax(net_out)
+                tower_soft_preds.append(softmax_pred)
+                pred = tf.argmax(softmax_pred, axis=-1)
+
+                # Loss
+                if loss_fn is not sparse_softmax_cross_entropy_with_logits:
+                    # sparse_softmax_cross_entropy applies the
+                    # softmax interally
+                    net_out = softmax_pred
+            else:
+                sigmoid_pred = tf.sigmoid(net_out)
+                if loss_fn is not tf.nn.sigmoid_cross_entropy_with_logits:
+                    # sigmoid_cross_entropy_with_logits applies the
+                    # sigmoid internally
+                    net_out = sigmoid_pred
+                pred = sigmoid_pred
             tower_preds.append(pred)
 
-            # Loss
-            if loss_fn is not sparse_softmax_cross_entropy_with_logits:
-                # sparse_softmax_cross_entropy applies the
-                # softmax internally
-                net_out = softmax_pred
-            loss = apply_loss(dev_labels, net_out, loss_fn,
+            if cfg.of_prediction and cfg.of_regularization_type is not 'None':
+                apply_loss_on = (net_out, of_pred)
+            else:
+                apply_loss_on = net_out
+            loss = apply_loss(dev_labels, apply_loss_on, loss_fn,
                               weight_decay, is_training,
                               return_mean_loss=True)
             tower_losses.append(loss)
@@ -621,12 +660,18 @@ def build_graph(placeholders, input_shape, build_model, which_set):
     preds = tf.concat(tower_preds, axis=0, name='concat_preds')
     preds = preds[:num_batches]
     preds_flat = tf.reshape(preds, [-1])
+    if cfg.of_prediction:
+        of_preds = tf.concat(tower_of_preds, axis=0,
+                             name='concat_of_preds')
+        of_preds = of_preds[:num_batches]
     tf.summary.scalar('control_flow/batch_size_' + which_set,
                       tf.shape(preds)[0], summaries)
 
-    # Convert from list of tensors to tensor, and average
-    softmax_preds = tf.concat(tower_soft_preds, axis=0, name='concat_softmax')
-    softmax_preds = softmax_preds[:num_batches]
+    if cfg.task in (cfg.task_names['seg'], cfg.task_names['class']):
+        # Convert from list of tensors to tensor, and average
+        softmax_preds = tf.concat(tower_soft_preds, axis=0,
+                                  name='concat_softmax')
+        softmax_preds = softmax_preds[:num_batches]
 
     # Concatenate the per-gpu placeholders to get a placeholder for the
     # full list of gpus and one for the subset to be used for
@@ -636,14 +681,15 @@ def build_graph(placeholders, input_shape, build_model, which_set):
     # (equivalent to labels[:np.prod(preds.shape)])
     labels = labels[:tf.shape(tf.reshape(preds, [-1]))[0]]
 
-    # TODO Compute it for training as well (requires a dict of cms per
-    # subset + adding one_subset_per_batch to training as well)
-    # Compute the (potentially masked) mean IoU
-    mask = tf.ones_like(labels)
-    if len(cfg.void_labels):
-        mask = tf.cast(tf.less_equal(labels, nclasses), tf.int32)
-    m_iou, per_class_iou, cm_update_op, reset_cm_op = compute_mean_iou(
-        labels, preds_flat, nclasses, mask)
+    if cfg.task == cfg.task_names['seg']:
+        # TODO Compute it for training as well (requires a dict of cms per
+        # subset + adding one_subset_per_batch to training as well)
+        # Compute the (potentially masked) mean IoU
+        mask = tf.ones_like(labels)
+        if len(cfg.void_labels):
+            mask = tf.cast(tf.less_equal(labels, nclasses), tf.int32)
+        m_iou, per_class_iou, cm_update_op, reset_cm_op = compute_mean_iou(
+            labels, preds_flat, nclasses, mask)
 
     # Compute the average *per variable* over the towers
     losses = tf.stack(tower_losses, axis=0, name='concat_losses')
@@ -676,8 +722,18 @@ def build_graph(placeholders, input_shape, build_model, which_set):
 
         outs = [avg_tower_loss, train_ops]
     else:
-        outs = [preds, softmax_preds, m_iou, per_class_iou,
-                avg_tower_loss, cm_update_op]
+        if cfg.task == cfg.task_names['reg']:
+            if cfg.of_prediction:
+                outs = [of_preds, preds, avg_tower_loss, None]
+            else:
+                outs = [preds, avg_tower_loss, None]
+        else:
+            if cfg.of_prediction:
+                outs = [of_preds, preds, softmax_preds, m_iou, per_class_iou,
+                        avg_tower_loss, cm_update_op]
+            else:
+                outs = [preds, softmax_preds, m_iou, per_class_iou,
+                        avg_tower_loss, cm_update_op]
 
     # TODO: Averaged gradients visualisation
     # Add the histograms of the gradients
@@ -713,6 +769,8 @@ def build_graph(placeholders, input_shape, build_model, which_set):
     for _, s in enumerate(summaries[::-1]):
         summary_ops.append(tf.summary.merge(tf.get_collection_ref(key=s)))
 
+    if cfg.task == cfg.task_names['reg']:
+        reset_cm_op = None
     return outs, summary_ops, reset_cm_op
 
 
