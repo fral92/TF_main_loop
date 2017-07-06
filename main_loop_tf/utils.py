@@ -40,7 +40,7 @@ def split_in_chunks(x_batch, y_batch, gpus_used):
     return x_batch_chunks, y_batch_chunks
 
 
-def apply_loss(labels, net_out, loss_fn, weight_decay, is_training,
+def apply_loss(labels, net_out, of_preds, loss_fn, weight_decay, is_training,
                return_mean_loss=False, mask_voids=True):
     '''Applies the user-specified loss function and returns the loss
 
@@ -51,32 +51,26 @@ def apply_loss(labels, net_out, loss_fn, weight_decay, is_training,
 
     cfg = gflags.cfg
 
-    if cfg.of_prediction:
-        net_out, of_preds = net_out
-
-    if cfg.task in (cfg.task_names['seg'], cfg.task_names['class']):
-        if mask_voids and len(cfg.void_labels):
-            # TODO Check this
-            print('Masking the void labels')
-            mask = tf.not_equal(labels, cfg.void_labels)
-            labels *= tf.cast(mask, 'int32')  # void_class --> 0 (random class)
-            # Train loss
-            loss = loss_fn(labels=labels,
-                           logits=tf.reshape(net_out, [-1, cfg.nclasses]))
-            mask = tf.cast(mask, 'float32')
-            loss *= mask
-        else:
-            # Train loss
-            loss = loss_fn(labels=labels,
-                           logits=tf.reshape(net_out, [-1, cfg.nclasses]))
+    if (cfg.task in ('segmenation', 'classification') and
+            mask_voids and len(cfg.void_labels)):
+        # TODO Check this
+        print('Masking the void labels')
+        mask = tf.not_equal(labels, cfg.void_labels)
+        labels *= tf.cast(mask, 'int32')  # void_class --> 0 (random class)
+        # Train loss
+        loss = loss_fn(labels=labels,
+                       logits=tf.reshape(net_out, [-1, cfg.nclasses]))
+        mask = tf.cast(mask, 'float32')
+        loss *= mask
+    elif loss_fn is tf.losses.mean_squared_error:
+        loss = loss_fn(labels=labels,
+                       predictions=tf.reshape(net_out, [-1]))
+    elif loss_fn is tf.nn.sigmoid_cross_entropy_with_logits:
+        loss = loss_fn(labels=tf.cast(labels, cfg._FLOATX),
+                       logits=tf.reshape(net_out, [-1]))
     else:
-        if loss_fn is tf.losses.mean_squared_error:
-            loss = loss_fn(labels=labels,
-                           predictions=tf.reshape(net_out, [-1]))
-        elif loss_fn is tf.nn.sigmoid_cross_entropy_with_logits:
-            loss = loss_fn(labels=tf.cast(labels, cfg._FLOATX),
-                           logits=tf.reshape(net_out, [-1]))
-        # TODO: else statement
+        loss = loss_fn(labels=labels,
+                       logits=tf.reshape(net_out, [-1, cfg.nclasses]))
 
     if is_training:
         loss = apply_l2_penalty(loss, weight_decay)
@@ -88,8 +82,8 @@ def apply_loss(labels, net_out, loss_fn, weight_decay, is_training,
         else:
             loss = tf.reduce_mean(loss)
         if cfg.of_regularization_type is not 'None':
-            if not cfg.of_prediction:
-                raise RuntimeError('The model does not perform optical'
+            if not cfg.model_returns_of:
+                raise RuntimeError('The model does not perform optical '
                                    'flow prediction')
             else:
                 if cfg.of_regularization_type == 'huber_penalty':

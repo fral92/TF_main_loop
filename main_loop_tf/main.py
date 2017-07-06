@@ -84,10 +84,7 @@ def __parse_config(argv=None):
     cfg.__dict__ = {k: el.value for (k, el) in fl.iteritems()}
     gflags.cfg = cfg
 
-    cfg.task_names = dict({'reg': 'regression',
-                           'seg': 'segmentation',
-                           'class': 'classification'})
-    assert cfg.task in cfg.task_names.values(), (
+    assert cfg.task in ('regression, segmentation, classification'), (
         'Only regression/classification/segmentation are available')
 
     # ============ gsheet
@@ -150,14 +147,12 @@ def __parse_config(argv=None):
     try:
         Dataset = getattr(dataset_loaders, cfg.dataset)
     except AttributeError:
-        try:
-            Dataset = getattr(dataset_loaders, cfg.dataset.capitalize() +
-                              'Dataset')
-        except AttributeError:
-            Dataset = getattr(dataset_loaders, cfg.dataset + 'Dataset')
+        Dataset = getattr(dataset_loaders, cfg.dataset[0].upper() +
+                          cfg.dataset[1:] + 'Dataset')
 
     cfg.Dataset = Dataset
-    dataset_params = {}
+    # Add dataset extra parameters specific for the dataset
+    dataset_params = cfg.train_extra_params
     dataset_params['batch_size'] = cfg.batch_size * cfg.num_splits
     dataset_params['data_augm_kwargs'] = {}
     dataset_params['data_augm_kwargs']['crop_size'] = cfg.crop_size
@@ -171,32 +166,17 @@ def __parse_config(argv=None):
     if cfg.seq_length:
         dataset_params['seq_length'] = cfg.seq_length
 
-        cfg.input_shape = [None, cfg.seq_length] + list(Dataset.data_shape)
-        cfg.val_input_shape = [None, cfg.seq_length] + list(Dataset.data_shape)
-
-        if cfg.of:
-            cfg.input_shape[-1] = 6
-            cfg.val_input_shape[-1] = 6
-
-        if cfg.crop_size:
-            cfg.input_shape[2:4] = cfg.crop_size
         ret_ext_seq = cfg.return_extended_sequences
         ret_middle_frame = cfg.return_middle_frame_only
         dataset_params['return_extended_sequences'] = ret_ext_seq
         dataset_params['return_middle_frame_only'] = ret_middle_frame
-    else:
-        cfg.input_shape = [None] + list(Dataset.data_shape)
-        cfg.val_input_shape = [None] + list(Dataset.data_shape)
-        if cfg.crop_size:
-            cfg.input_shape[1:3] = cfg.crop_size
+
     dataset_params['use_threads'] = cfg.use_threads
     dataset_params['nthreads'] = cfg.nthreads
     dataset_params['remove_per_img_mean'] = cfg.remove_per_img_mean
     dataset_params['divide_by_per_img_std'] = cfg.divide_by_per_img_std
     dataset_params['remove_mean'] = cfg.remove_mean
     dataset_params['divide_by_std'] = cfg.divide_by_std
-    # Add dataset extra parameters specific for each dataset
-    dataset_params.update(cfg.train_extra_params)
     cfg.dataset_params = dataset_params
     cfg.valid_params = deepcopy(cfg.dataset_params)
     cfg.valid_params.update({
@@ -212,12 +192,44 @@ def __parse_config(argv=None):
         'data_augm_kwargs': {'return_optical_flow': cfg.of}})
     # Add dataset extra parameters specific for each dataset
     cfg.valid_params.update(cfg.val_extra_params)
+
+    # Create temporary dataset object (training/validation) to get
+    # dynamic class elements (e.g. data_shape)
+    train_temp = Dataset(
+        which_set='train',
+        return_list=False,
+        **dataset_params)
+    valid_temp = Dataset(
+        which_set='valid',
+        **cfg.valid_params)
+
+    if cfg.seq_length:
+        cfg.input_shape = [None, cfg.seq_length] + list(
+            train_temp.next()['data'].shape[2:])
+        cfg.val_input_shape = [None, cfg.seq_length] + list(
+            valid_temp.next()['data'].shape[2:])
+
+        if cfg.of:
+            cfg.input_shape[-1] = 6
+            cfg.val_input_shape[-1] = 6
+
+        if cfg.crop_size:
+            cfg.input_shape[2:4] = cfg.crop_size
+    else:
+        cfg.input_shape = [None] + list(train_temp.next()['data'].shape[1:])
+        cfg.val_input_shape = [None] + list(
+            valid_temp.next()['data'].shape[1:])
+        if cfg.crop_size:
+            cfg.input_shape[1:3] = cfg.crop_size
+
     cfg.void_labels = getattr(Dataset, 'void_labels', [])
     cfg.nclasses = Dataset.non_void_nclasses
     cfg.nclasses_w_void = Dataset.nclasses
     tf.logging.info('{} classes ({} non-void):'.format(cfg.nclasses_w_void,
                                                        cfg.nclasses))
-
+    # Destroy temporary dataset objects
+    train_temp.finish()
+    valid_temp.finish()
     # Optimization
     try:
         cfg.Optimizer = getattr(training, cfg.optimizer + 'Optimizer')
@@ -232,6 +244,12 @@ def __parse_config(argv=None):
         except AttributeError:
             loss_fn = getattr(loss, cfg.loss_fn)
     cfg.loss_fn = loss_fn
+
+    try:
+        out_nonlinearity = getattr(tf, cfg.out_nonlinearity)
+    except AttributeError:
+        out_nonlinearity = getattr(slim, cfg.out_nonlinearity)
+    cfg.out_nonlinearity = out_nonlinearity
 
     cfg.val_skip = (cfg.val_skip_first if cfg.val_skip_first else
                     max(1, cfg.val_every_epochs) - 1)
@@ -348,7 +366,7 @@ def __run(build_model):
                                              cfg.decay_steps,
                                              cfg.decay_rate,
                                              staircase=cfg.staircase)
-        elif cfg.lr_decay == 'custom':
+        elif cfg.lr_decay == 'STN':
             epoch = tf.cast(cfg.global_step / cfg.decay_steps, tf.int32)
             lr = cfg.lr * tf.pow(0.5, tf.cast(epoch / 50, cfg._FLOATX))
         else:
@@ -503,7 +521,7 @@ def build_graph(placeholders, input_shape, build_model, which_set):
     # Init variables
     tower_grads = []
     tower_preds = []
-    tower_soft_preds = []
+    tower_pred_probabilities = []
     tower_losses = []
     tower_of_preds = []
     summaries = []
@@ -522,39 +540,37 @@ def build_graph(placeholders, input_shape, build_model, which_set):
             reuse_variables = True
 
             # Model output, softmax and prediction
-            if not cfg.of_prediction:
-                net_out = build_model(dev_inputs, is_training)
-            else:
+            if cfg.model_returns_of:
                 model_output = build_model(dev_inputs, is_training)
                 net_out = model_output[0]
                 of_pred = model_output[1]
                 tower_of_preds.append(of_pred)
+            else:
+                net_out = build_model(dev_inputs, is_training)
+                of_pred = None
 
-            if cfg.task in (cfg.task_names['class'],
-                            cfg.task_names['seg']):
-                softmax_pred = slim.softmax(net_out)
-                tower_soft_preds.append(softmax_pred)
-                pred = tf.argmax(softmax_pred, axis=-1)
+            pred_probabilities = cfg.out_nonlinearity(net_out)
+            tower_pred_probabilities.append(pred_probabilities)
+            pred = tf.argmax(pred_probabilities, axis=-1)
 
-                # Loss
+            # Loss
+            if cfg.out_nonlinearity is slim.softmax:
                 if loss_fn is not sparse_softmax_cross_entropy_with_logits:
                     # sparse_softmax_cross_entropy applies the
-                    # softmax interally
-                    net_out = softmax_pred
-            else:
-                sigmoid_pred = tf.sigmoid(net_out)
+                    # softmax internally
+                    net_out = pred_probabilities
+            elif cfg.out_nonlinearity is tf.sigmoid:
                 if loss_fn is not tf.nn.sigmoid_cross_entropy_with_logits:
                     # sigmoid_cross_entropy_with_logits applies the
                     # sigmoid internally
-                    net_out = sigmoid_pred
-                pred = sigmoid_pred
+                    net_out = pred_probabilities
+            if cfg.task == 'regression':
+                pred = pred_probabilities
+            else:
+                pred = tf.argmax(pred_probabilities, axis=-1)
             tower_preds.append(pred)
 
-            if cfg.of_prediction and cfg.of_regularization_type is not 'None':
-                apply_loss_on = (net_out, of_pred)
-            else:
-                apply_loss_on = net_out
-            loss = apply_loss(dev_labels, apply_loss_on, loss_fn,
+            loss = apply_loss(dev_labels, net_out, of_pred, loss_fn,
                               weight_decay, is_training,
                               return_mean_loss=True)
             tower_losses.append(loss)
@@ -660,18 +676,19 @@ def build_graph(placeholders, input_shape, build_model, which_set):
     preds = tf.concat(tower_preds, axis=0, name='concat_preds')
     preds = preds[:num_batches]
     preds_flat = tf.reshape(preds, [-1])
-    if cfg.of_prediction:
+    if cfg.model_returns_of:
         of_preds = tf.concat(tower_of_preds, axis=0,
                              name='concat_of_preds')
         of_preds = of_preds[:num_batches]
+    else:
+        of_preds = []
     tf.summary.scalar('control_flow/batch_size_' + which_set,
                       tf.shape(preds)[0], summaries)
 
-    if cfg.task in (cfg.task_names['seg'], cfg.task_names['class']):
-        # Convert from list of tensors to tensor, and average
-        softmax_preds = tf.concat(tower_soft_preds, axis=0,
-                                  name='concat_softmax')
-        softmax_preds = softmax_preds[:num_batches]
+    # Convert from list of tensors to tensor, and average
+    pred_probabilities = tf.concat(tower_pred_probabilities, axis=0,
+                                   name='concat_out_nonlinearity')
+    pred_probabilities = pred_probabilities[:num_batches]
 
     # Concatenate the per-gpu placeholders to get a placeholder for the
     # full list of gpus and one for the subset to be used for
@@ -681,7 +698,7 @@ def build_graph(placeholders, input_shape, build_model, which_set):
     # (equivalent to labels[:np.prod(preds.shape)])
     labels = labels[:tf.shape(tf.reshape(preds, [-1]))[0]]
 
-    if cfg.task == cfg.task_names['seg']:
+    if cfg.compute_mean_iou:
         # TODO Compute it for training as well (requires a dict of cms per
         # subset + adding one_subset_per_batch to training as well)
         # Compute the (potentially masked) mean IoU
@@ -690,6 +707,9 @@ def build_graph(placeholders, input_shape, build_model, which_set):
             mask = tf.cast(tf.less_equal(labels, nclasses), tf.int32)
         m_iou, per_class_iou, cm_update_op, reset_cm_op = compute_mean_iou(
             labels, preds_flat, nclasses, mask)
+    else:
+        cm_update_op = None
+        reset_cm_op = None
 
     # Compute the average *per variable* over the towers
     losses = tf.stack(tower_losses, axis=0, name='concat_losses')
@@ -722,18 +742,12 @@ def build_graph(placeholders, input_shape, build_model, which_set):
 
         outs = [avg_tower_loss, train_ops]
     else:
-        if cfg.task == cfg.task_names['reg']:
-            if cfg.of_prediction:
-                outs = [of_preds, preds, avg_tower_loss, None]
-            else:
-                outs = [preds, avg_tower_loss, None]
-        else:
-            if cfg.of_prediction:
-                outs = [of_preds, preds, softmax_preds, m_iou, per_class_iou,
-                        avg_tower_loss, cm_update_op]
-            else:
-                outs = [preds, softmax_preds, m_iou, per_class_iou,
-                        avg_tower_loss, cm_update_op]
+        metrics_out = []
+        if cfg.compute_mean_iou:
+            metrics_out.append(m_iou, per_class_iou)
+
+        outs = [of_preds, preds, pred_probabilities, metrics_out,
+                avg_tower_loss, cm_update_op]
 
     # TODO: Averaged gradients visualisation
     # Add the histograms of the gradients
@@ -769,8 +783,6 @@ def build_graph(placeholders, input_shape, build_model, which_set):
     for _, s in enumerate(summaries[::-1]):
         summary_ops.append(tf.summary.merge(tf.get_collection_ref(key=s)))
 
-    if cfg.task == cfg.task_names['reg']:
-        reset_cm_op = None
     return outs, summary_ops, reset_cm_op
 
 
@@ -812,7 +824,7 @@ def main_loop(placeholders, val_placeholders, train_outs, train_summary_ops,
         cv2.namedWindow("rgb-optflow")
 
     while not sv.should_stop():
-        epoch_id = cum_iter // train.nbatches
+        epoch_id = (cum_iter + 1) // train.nbatches
         summary = tf.Summary.Value(tag='control_flow/Epoch',
                                    simple_value=epoch_id + 1)
         summary_str = tf.Summary(value=[summary])
