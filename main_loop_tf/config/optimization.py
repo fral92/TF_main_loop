@@ -58,16 +58,5 @@ gflags.DEFINE_string("thresh_loss", 0.7,
 gflags.DEFINE_string("grad_noise_decay", None,
                      "Gradient Noise Decay Schedule [neural_gpu]")
 gflags.DEFINE_float("grad_multiplier", None, "Gradient Multipliers")
-gflags.DEFINE_string('of_regularization_type', None, 'Type of regularization '
-                     'to be applied to the of gradients if any. For now only '
-                     'Huber penalty is available (huber_penalty)')
-# Parameters for the optical flow regularizer (e.g. Huber penalty)
-# For the Huber penalty they are:
-# - version [custom/tf]
-# - delta
-# - weight_decay
-gflags_ext.DEFINE_multidict('of_regularization_params', {},
-                            'Optical flow regularization params')
-gflags.DEFINE_string('of_local_grads_filter', 'stn_stencil', 'Type of '
-                     'filter to be applied to compute optical flow local '
-                     'gradients. [stn_stencil, sobel]')
+gflags.DEFINE_string('out_nonlinearity', 'softmax', 'Output nonlinearity '
+                     'used to get the final prediction probabilities')

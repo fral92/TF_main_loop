@@ -67,7 +67,7 @@ def validate(placeholders,
                            '[{elapsed}<{remaining},'
                            '{rate_fmt} {postfix}]')
 
-    if cfg.task != cfg.task_names['reg']:
+    if cfg.compute_mean_iou:
         prev_subset = None
         per_subset_IoUs = {}
         # Reset Confusion Matrix at the beginning of validation
@@ -102,7 +102,7 @@ def validate(placeholders,
         summary_op = summary_ops[this_num_splits - 1]
 
         # TODO: check the confusion matrix!
-        if cfg.task != cfg.task_names['reg']:
+        if cfg.compute_mean_iou:
             # Reset the confusion matrix when we switch video
             if this_set.set_has_GT and (not prev_subset or
                                         subset != prev_subset):
@@ -147,41 +147,33 @@ def validate(placeholders,
         in_vals.extend([(num_batches, this_len_batch)])
         feed_dict = {p: v for(p, v) in in_vals}
 
-        if this_set.set_has_GT:
-            if cfg.task == cfg.task_names['seg']:
-                # Class balance
-                # class_balance_w = np.ones(np.prod(
-                #     mini_x.shape[:3])).astype(floatX)
-                # class_balance = loss_kwargs.get('class_balance', '')
-                # if class_balance in ['median_freq_cost', 'rare_freq_cost']:
-                #     w_freq = loss_kwargs.get('w_freq')
-                #     class_balance_w = w_freq[y_true.flatten()].astype(floatX)
+        if this_set.set_has_GT and cfg.compute_mean_iou:
+            # Class balance
+            # class_balance_w = np.ones(np.prod(
+            #     mini_x.shape[:3])).astype(floatX)
+            # class_balance = loss_kwargs.get('class_balance', '')
+            # if class_balance in ['median_freq_cost', 'rare_freq_cost']:
+            #     w_freq = loss_kwargs.get('w_freq')
+            #     class_balance_w = w_freq[y_true.flatten()].astype(floatX)
 
-                # Get the batch pred, the mIoU so far (computed incrementally
-                # over the sequences processed so far), the batch loss and
-                # potentially the summary
-                if cidx % cfg.val_summary_freq == 0:
-                    if cfg.of_prediction:
-                        (of_pred_batch, y_soft_batch, mIoU, per_class_IoU,
-                         loss, _, summary_str) = cfg.sess.run(
-                             outs + [summary_op], feed_dict=feed_dict)
-                    else:
-                        (y_pred_batch, y_soft_batch, mIoU, per_class_IoU, loss,
-                         _, summary_str) = cfg.sess.run(outs + [summary_op],
-                                                        feed_dict=feed_dict)
+            # Get the batch pred, the mIoU so far (computed incrementally
+            # over the sequences processed so far), the batch loss and
+            # potentially the summary
+            if cidx % cfg.val_summary_freq == 0:
+                    (of_pred_batch, y_pred_batch, y_prob_batch,
+                     metrics_out, loss, _, summary_str) = cfg.sess.run(
+                         outs + [summary_op], feed_dict=feed_dict)
                     cfg.sv.summary_computed(cfg.sess, summary_str,
                                             global_step=cidx)
-                else:
-                    if cfg.of_prediction:
-                        (of_pred_batch, y_pred_batch, y_soft_batch, mIoU,
-                         per_class_IoU, loss, _) = cfg.sess.run(
-                             outs, feed_dict=feed_dict)
-                    else:
-                        (y_pred_batch, y_soft_batch, mIoU, per_class_IoU, loss,
-                         _) = cfg.sess.run(outs, feed_dict=feed_dict)
+            else:
+                (of_pred_batch, y_pred_batch, y_prob_batch,
+                 metrics_out, loss, _) = cfg.sess.run(
+                     outs, feed_dict=feed_dict)
 
-                tot_loss += loss
+            tot_loss += loss
 
+            if cfg.compute_mean_iou:
+                mIoU, per_class_IoU = metrics_out
                 # If fg/bg, just consider the foreground class
                 if len(per_class_IoU) == 2:
                     per_class_IoU = per_class_IoU[1]
@@ -194,79 +186,28 @@ def validate(placeholders,
                 pbar.set_postfix({
                     'loss': '{:.3f}({:.3f})'.format(loss, tot_loss/(bidx+1)),
                     'mIoU': '{:.3f}'.format(mIoU)})
-            elif cfg.task == cfg.task_names['reg']:
-                if cidx % cfg.val_summary_freq == 0:
-                    if cfg.of_prediction:
-                        (of_pred_batch, y_pred_batch, loss,
-                         summary_str) = cfg.sess.run(outs + [summary_op],
-                                                     feed_dict=feed_dict)
-                    else:
-                        (y_pred_batch, loss,
-                         summary_str) = cfg.sess.run(outs + [summary_op],
-                                                     feed_dict=feed_dict)
-                else:
-                    if cfg.of_prediction:
-                        (of_pred_batch, y_pred_batch,
-                         loss) = cfg.sess.run(outs, feed_dict=feed_dict)
-                    else:
-                        (y_pred_batch, loss) = cfg.sess.run(
-                            outs, feed_dict=feed_dict)
-            elif cfg.task == cfg.task_names['class']:
-                pass
         else:
-            if cfg.task == cfg.task_names['seg']:
-                if cidx % cfg.val_summary_freq == 0:
-                    if cfg.of_prediction:
-                        (of_pred_batch, y_pred_batch, y_soft_batch,
-                         summary_str) = cfg.sess.run(outs[:3] + [summary_op],
-                                                     feed_dict=feed_dict)
-                    else:
-                        (y_pred_batch, y_soft_batch,
-                         summary_str) = cfg.sess.run(outs[:2] + [summary_op],
-                                                     feed_dict=feed_dict)
-                        mIoU = 0
-                        cfg.sv.summary_computed(cfg.sess, summary_str,
-                                                global_step=cidx)
-                else:
-                    if cfg.of_prediction:
-                        (of_pred_batch, y_pred_batch,
-                         y_soft_batch) = cfg.sess.run(outs[:3],
-                                                      feed_dict=feed_dict)
-                    else:
-                        (y_pred_batch, y_soft_batch) = cfg.sess.run(
-                            outs[:2], feed_dict=feed_dict)
-                        mIoU = 0
-            elif cfg.task == cfg.task_names['reg']:
-                if cidx % cfg.val_summary_freq == 0:
-                    if cfg.of_prediction:
-                        (of_pred_batch, y_pred_batch,
-                         summary_str) = cfg.sess.run(outs[:2] + [summary_op],
-                                                     feed_dict=feed_dict)
-                    else:
-                        y_pred_batch, summary_str = cfg.sess.run(
-                            outs[0] + [summary_op], feed_dict=feed_dict)
-                else:
-                    if cfg.of_prediction:
-                        of_pred_batch, y_pred_batch = cfg.sess.run(
-                            outs[:2], feed_dict=feed_dict)
-                    else:
-                        y_pred_batch = cfg.sess.run(outs[0],
-                                                    feed_dict=feed_dict)
-
-            elif cfg.task == cfg.task_names['class']:
-                pass
+            if cidx % cfg.val_summary_freq == 0:
+                (of_pred_batch, y_pred_batch, y_prob_batch,
+                 summary_str) = cfg.sess.run(outs[:3] + [summary_op],
+                                             feed_dict=feed_dict)
+                mIoU = 0
+                cfg.sv.summary_computed(cfg.sess, summary_str,
+                                        global_step=cidx)
+            else:
+                (of_pred_batch, y_pred_batch,
+                 y_prob_batch) = cfg.sess.run(outs[:3], feed_dict=feed_dict)
+                mIoU = 0
         # TODO there is no guarantee that this will be processed
         # in order. We could use condition variables, e.g.,
         # http://python.active-venture.com/lib/condition-objects.html
         #
+        if not cfg.model_returns_of:
+            of_pred_batch = [None for _ in range(len(f_batch))]
         # Save image summary for learning visualization
-        if cfg.task == cfg.task_names['reg']:
-            y_soft_batch = None
-        if not cfg.of_prediction:
-            of_pred_batch = None
         img_queue.put((frame_idx, this_set, x_batch, y_batch, f_batch, subset,
                        raw_data_batch, of_pred_batch, y_pred_batch,
-                       y_soft_batch))
+                       y_prob_batch))
         cidx += 1
         frame_idx += len(x_batch)
         pbar.update(1)
@@ -278,7 +219,7 @@ def validate(placeholders,
 
     # Write the summaries
     class_labels = this_set.mask_labels[:this_set.non_void_nclasses]
-    if cfg.task == cfg.task_names['seg']:
+    if cfg.compute_mean_iou:
         if cfg.summary_per_subset:
             # Write the IoUs per subset (i.e., video) and (potentially) class
             # and their average
@@ -291,12 +232,6 @@ def validate(placeholders,
             write_IoUs_summaries({'': per_class_IoU}, step=epoch_id,
                                  class_labels=class_labels)
             write_IoUs_summaries({'global_avg': mIoU}, step=epoch_id)
-    elif cfg.task == cfg.task_names['reg']:
-        # TODO: define the metrics for the regression task
-        mIoU = 1
-    elif cfg.task == cfg.task_names['class']:
-        # TODO: define the metrics for the classification task
-        mIoU = 1
 
     img_queue.join()  # Wait for the threads to be done
     this_set.finish()  # Close the dataset
@@ -376,7 +311,7 @@ def save_images(img_queue, save_basedir, sentinel):
                 img_queue.task_done()
                 break
             (bidx, this_set, x_batch, y_batch, f_batch, subset,
-             raw_data_batch, of_pred_batch, y_pred_batch, y_soft_batch) = img
+             raw_data_batch, of_pred_batch, y_pred_batch, y_prob_batch) = img
 
             cfg = gflags.cfg
 
@@ -396,50 +331,29 @@ def save_images(img_queue, save_basedir, sentinel):
                     cmap = None
             labels = this_set.mask_labels
 
-            if y_soft_batch is None and of_pred_batch is None:
+            if not np.all(of_pred_batch):
                 lengths = (len(x_batch), len(y_batch), len(f_batch),
-                           len(y_pred_batch), len(raw_data_batch))
-                assert all(el == lengths[0] for el in lengths), (
-                    'x_batch: {}\ny_batch: {}\nf_batch: {}\ny_pred_batch: {}'
-                    '\nraw_data_batch: {}'.format(*lengths))
-            elif y_soft_batch is None:
-                lengths = (len(x_batch), len(y_batch), len(f_batch),
-                           len(y_pred_batch), len(of_pred_batch),
+                           len(y_pred_batch), len(y_prob_batch),
                            len(raw_data_batch))
                 assert all(el == lengths[0] for el in lengths), (
                     'x_batch: {}\ny_batch: {}\nf_batch: {}\ny_pred_batch: {}'
-                    '\nof_pred_batch: {}\nraw_data_batch: {}'.format(
-                        *lengths))
-            elif of_pred_batch is None:
-                lengths = (len(x_batch), len(y_batch), len(f_batch),
-                           len(y_pred_batch), len(y_soft_batch),
-                           len(raw_data_batch))
-                assert all(el == lengths[0] for el in lengths), (
-                    'x_batch: {}\ny_batch: {}\nf_batch: {}\ny_pred_batch: {}'
-                    '\ny_soft_batch: {}\nraw_data_batch: {}'.format(
+                    '\ny_prob_batch: {}\nraw_data_batch: {}'.format(
                           *lengths))
+            else:
+                lengths = (len(x_batch), len(y_batch), len(f_batch),
+                           len(y_pred_batch), len(y_prob_batch),
+                           len(of_pred_batch), len(raw_data_batch))
+                assert all(el == lengths[0] for el in lengths), (
+                    'x_batch: {}\ny_batch: {}\nf_batch: {}\ny_pred_batch: {}'
+                    '\ny_prob_batch: {}\nof_pred_batch: {}'
+                    '\nraw_data_batch: {}'.format(*lengths))
 
-            if y_soft_batch is None and of_pred_batch is None:
-                zip_list = (x_batch, y_batch, f_batch, y_pred_batch,
-                            raw_data_batch)
-            elif y_soft_batch is None:
-                zip_list = (x_batch, y_batch, f_batch, of_pred_batch,
-                            y_pred_batch, raw_data_batch)
-            elif of_pred_batch is None:
-                zip_list = (x_batch, y_batch, f_batch, y_pred_batch,
-                            raw_data_batch)
+            zip_list = (x_batch, y_batch, f_batch, of_pred_batch,
+                        y_pred_batch, y_prob_batch, raw_data_batch)
+
             # Save samples, iterating over each element of the batch
             for el in zip(*zip_list):
-                if y_soft_batch is None and of_pred_batch is None:
-                    (x, y, f, y_pred, raw_data) = el
-                    y_soft_pred = None
-                    of_pred = None
-                elif y_soft_batch is None:
-                    (x, y, f, of_pred, y_pred, raw_data) = el
-                    y_soft_pred = None
-                elif of_pred_batch is None:
-                    of_pred = None
-                    (x, y, f, y_pred, y_soft_pred, raw_data) = el
+                (x, y, f, of_pred, y_pred, y_prob, raw_data) = el
 
                 # y = np.expand_dims(y, -1)
                 # y_pred = np.expand_dims(y_pred, -1)
@@ -459,16 +373,6 @@ def save_images(img_queue, save_basedir, sentinel):
                 else:
                     f = str(f) + '.png'
 
-                # if x.shape[-1] == 5:
-                #     # Keep only middle frame name and save as png
-                #     seq_length = x_batch.shape[1]
-                #     f = f[seq_length // 2]
-                #     f = f[:-4]  # strip .jpg
-                #     f = f + '.png'
-                # else:
-                #     f = f[0]
-                #     f = f[:-4]
-                #     f = f + '.png'
                 # Retrieve the optical flow channels
                 if x.shape[-1] == 5:
                     of = x[which_frame, ..., 3:]
@@ -497,9 +401,9 @@ def save_images(img_queue, save_basedir, sentinel):
                     heat_map_in = raw_data
 
                 # PRINT THE HEATMAP
-                if cfg.show_heatmaps_summaries and y_soft_pred is not None:
+                if cfg.show_heatmaps_summaries and nclasses is not None:
                     # do not pass optical flow
-                    save_heatmap_fn(heat_map_in, of, y_soft_pred, labels,
+                    save_heatmap_fn(heat_map_in, of, y_prob, labels,
                                     nclasses, save_basedir, subset, f, bidx)
 
                 # PRINT THE SAMPLES
@@ -537,7 +441,7 @@ def save_images(img_queue, save_basedir, sentinel):
             continue
 
 
-def save_heatmap_fn(x, of, y_soft_pred, labels, nclasses, save_basedir, subset,
+def save_heatmap_fn(x, of, y_prob, labels, nclasses, save_basedir, subset,
                     f, bidx):
     '''Save an image of the probability of each class
 
@@ -579,7 +483,7 @@ def save_heatmap_fn(x, of, y_soft_pred, labels, nclasses, save_basedir, subset,
         grid[1].imshow(of, vmin=0, vmax=1, interpolation='nearest')
         grid[1].set_title('Optical flow')
     # heatmaps
-    for l, pred, ax in zip(labels[:nclasses-1], y_soft_pred.transpose(2, 0, 1),
+    for l, pred, ax in zip(labels[:nclasses-1], y_prob.transpose(2, 0, 1),
                            grid[num_extra_frames:]):
         im = ax.imshow(pred, cmap='hot', vmin=0, vmax=1,
                        interpolation='nearest')
@@ -621,8 +525,12 @@ def save_samples_and_animations(raw_data, of, of_pred, y_pred, y, cmap, nclasses
     fig.subplots_adjust(left=0.1, right=0.9, bottom=0, top=1)
 
     # Set number of rows
-    n_rows = 2
-    n_cols = 3
+    if cfg.model_returns_of:
+        n_rows = 2
+        n_cols = 3
+    else:
+        n_rows = 2
+        n_cols = 2
 
     grid = AxesGrid(fig, 111,
                     nrows_ncols=(n_rows, n_cols),
@@ -637,7 +545,8 @@ def save_samples_and_animations(raw_data, of, of_pred, y_pred, y, cmap, nclasses
         ax.set_yticks([sh[0]])
 
     # This element is not used
-    grid[5].set_visible(False)
+    if cfg.model_returns_of:
+        grid[5].set_visible(False)
 
     # image
     if raw_data.shape[-1] == 1:
@@ -650,22 +559,30 @@ def save_samples_and_animations(raw_data, of, of_pred, y_pred, y, cmap, nclasses
     grid[2].imshow(np.squeeze(y_pred), cmap=cmap, vmin=0, vmax=nclasses)
     grid[2].set_title('Prediction')
     im = None
-    # OF
     if of is not None:
-        im = grid[3].imshow(of, vmin=0, vmax=1, interpolation='nearest')
+        grid[3].imshow(of, vmin=0, vmax=1, interpolation='nearest')
         grid[3].set_title('Optical flow')
-        if of_pred is not None:
-            grid[4].imshow(of_pred)
-            grid[4].set_title('Predicted OF')
-        else:
-            grid[4].set_visible(False)
     else:
-        grid[4].set_visible(False)
-        if of_pred is not None:
-            grid[3].imshow(of_pred)
-            grid[3].set_title('Predicted OF')
-        else:
-            grid[3].set_visible(False)
+        grid[3].set_visible(False)
+    if of_pred is not None:
+        grid[4].imshow(of_pred)
+        grid[4].set_title('Predicted OF')
+    # OF
+    # if of is not None:
+    #     im = grid[3].imshow(of, vmin=0, vmax=1, interpolation='nearest')
+    #     grid[3].set_title('Optical flow')
+    #     if of_pred is not None:
+    #         grid[4].imshow(of_pred)
+    #         grid[4].set_title('Predicted OF')
+    #     else:
+    #         grid[4].set_visible(False)
+    # else:
+    #     grid[4].set_visible(False)
+    #     if of_pred is not None:
+    #         grid[3].imshow(of_pred)
+    #         grid[3].set_title('Predicted OF')
+    #     else:
+    #         grid[3].set_visible(False)
     # GT
     if y is not None:
         im = grid[1].imshow(np.squeeze(y), cmap=cmap, vmin=0, vmax=nclasses)

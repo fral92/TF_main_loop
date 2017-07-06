@@ -40,7 +40,7 @@ def split_in_chunks(x_batch, y_batch, gpus_used):
     return x_batch_chunks, y_batch_chunks
 
 
-def apply_loss(labels, net_out, loss_fn, weight_decay, is_training,
+def apply_loss(labels, net_out, of_preds, loss_fn, weight_decay, is_training,
                return_mean_loss=False, mask_voids=True):
     '''Applies the user-specified loss function and returns the loss
 
@@ -51,32 +51,26 @@ def apply_loss(labels, net_out, loss_fn, weight_decay, is_training,
 
     cfg = gflags.cfg
 
-    if cfg.of_prediction:
-        net_out, of_preds = net_out
-
-    if cfg.task in (cfg.task_names['seg'], cfg.task_names['class']):
-        if mask_voids and len(cfg.void_labels):
-            # TODO Check this
-            print('Masking the void labels')
-            mask = tf.not_equal(labels, cfg.void_labels)
-            labels *= tf.cast(mask, 'int32')  # void_class --> 0 (random class)
-            # Train loss
-            loss = loss_fn(labels=labels,
-                           logits=tf.reshape(net_out, [-1, cfg.nclasses]))
-            mask = tf.cast(mask, 'float32')
-            loss *= mask
-        else:
-            # Train loss
-            loss = loss_fn(labels=labels,
-                           logits=tf.reshape(net_out, [-1, cfg.nclasses]))
+    if (cfg.task in ('segmenation', 'classification') and
+            mask_voids and len(cfg.void_labels)):
+        # TODO Check this
+        print('Masking the void labels')
+        mask = tf.not_equal(labels, cfg.void_labels)
+        labels *= tf.cast(mask, 'int32')  # void_class --> 0 (random class)
+        # Train loss
+        loss = loss_fn(labels=labels,
+                       logits=tf.reshape(net_out, [-1, cfg.nclasses]))
+        mask = tf.cast(mask, 'float32')
+        loss *= mask
+    elif loss_fn is tf.losses.mean_squared_error:
+        loss = loss_fn(labels=labels,
+                       predictions=tf.reshape(net_out, [-1]))
+    elif loss_fn is tf.nn.sigmoid_cross_entropy_with_logits:
+        loss = loss_fn(labels=tf.cast(labels, cfg._FLOATX),
+                       logits=tf.reshape(net_out, [-1]))
     else:
-        if loss_fn is tf.losses.mean_squared_error:
-            loss = loss_fn(labels=labels,
-                           predictions=tf.reshape(net_out, [-1]))
-        elif loss_fn is tf.nn.sigmoid_cross_entropy_with_logits:
-            loss = loss_fn(labels=tf.cast(labels, cfg._FLOATX),
-                           logits=tf.reshape(net_out, [-1]))
-        # TODO: else statement
+        loss = loss_fn(labels=labels,
+                       logits=tf.reshape(net_out, [-1, cfg.nclasses]))
 
     if is_training:
         loss = apply_l2_penalty(loss, weight_decay)
@@ -87,16 +81,10 @@ def apply_loss(labels, net_out, loss_fn, weight_decay, is_training,
             loss = tf.reduce_sum(loss) / tf.reduce_sum(mask)
         else:
             loss = tf.reduce_mean(loss)
-        if cfg.of_regularization_type is not 'None':
-            if not cfg.of_prediction:
-                raise RuntimeError('The model does not perform optical'
-                                   'flow prediction')
-            else:
-                if cfg.of_regularization_type == 'huber_penalty':
-                    local_gradients = _compute_of_local_gradients(of_preds)
-                    loss = apply_huber_penalty(loss, local_gradients)
-                else:
-                    raise NotImplementedError()
+
+        # TODO: add loss for optical flow regression
+        # if cfg.model_returns_of:
+        #     loss += ...
         return loss
     else:
         return loss
@@ -109,80 +97,6 @@ def apply_l2_penalty(loss, weight_decay):
                                if 'bias' not in v.name])
         loss += l2_penalty * weight_decay
 
-    return loss
-
-
-def _compute_of_local_gradients(of_preds):
-    cfg = gflags.cfg
-
-    if cfg.of_local_grads_filter == 'stn_stencil':
-        s_filter_x = tf.constant_initializer(np.array(([0, 0, 0],
-                                                       [-1.2, 0, 1.2],
-                                                       [0, 0, 0]),
-                                                      dtype='float32'))
-        s_filter_y = tf.constant_initializer(np.array(([0, -1.2, 0],
-                                                       [0, 0, 0],
-                                                       [0, 1.2, 0]),
-                                                      dtype='float32'))
-    elif cfg.of_local_grads_filter == 'sobel':
-        s_filter_x = tf.constant_initializer(np.array(([1, 0, -1],
-                                                       [2, 0, -2],
-                                                       [1, 0, -1]),
-                                                      dtype='float32'))
-        s_filter_y = tf.constant_initializer(np.array(([1, 2, 1],
-                                                       [0, 0, 0],
-                                                       [-1, -2, -1]),
-                                                      dtype='float32'))
-    else:
-        raise NotImplementedError()
-
-    with tf.variable_scope('of_local_gradients'):
-        of_preds_x, of_preds_y = tf.split(of_preds, [1, 1], axis=3)
-        with slim.arg_scope([slim.conv2d],
-                            activation_fn=None,
-                            trainable=False):
-            grad_x = slim.conv2d(of_preds_x, 1, [3, 3], stride=1,
-                                 weights_initializer=s_filter_x,
-                                 normalizer_fn=None)
-            grad_y = slim.conv2d(of_preds_y, 1, [3, 3], stride=1,
-                                 weights_initializer=s_filter_y,
-                                 normalizer_fn=None)
-        grad_x = tf.square(grad_x)
-        grad_y = tf.square(grad_y)
-        local_gradients = tf.add(grad_x, grad_y)
-        local_gradients = tf.sqrt(local_gradients)
-    return local_gradients
-
-
-def apply_huber_penalty(loss, gradients):
-    cfg = gflags.cfg
-
-    version = cfg.of_regularization_params['version']
-    delta = cfg.of_regularization_params['delta']
-    weight_decay = cfg.of_regularization_params['weight_decay']
-    with tf.variable_scope('huber_penalty'):
-        if version == 'custom':
-            abs_grads = tf.abs(gradients)
-            quadratic = 0.5 * tf.square(abs_grads)
-            linear = delta * tf.subtract(abs_grads, 0.5 * delta)
-            huber_penalty = weight_decay * tf.where(
-                abs_grads <= delta, quadratic, linear)
-        elif version == 'tf':
-            abs_grads = math_ops.abs(gradients)
-            quadratic = math_ops.minimum(abs_grads, delta)
-            # The following expression is the same in value as
-            # tf.maximum(abs_error - delta, 0), but importantly the gradient
-            # for the expression when abs_error == delta is 0 (for
-            # tf.maximum it would be # 1).
-            # This is necessary to avoid doubling the gradient, since there is
-            # already a nonzero contribution to the gradient from the quadratic
-            # term.
-            linear = (abs_grads - quadratic)
-            huber_penalty = weight_decay * (
-                0.5 * quadratic**2 + delta * linear)
-        else:
-            raise NotImplementedError()
-        loss += tf.reduce_mean(huber_penalty)
     return loss
 
 
