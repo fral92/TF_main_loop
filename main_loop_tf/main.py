@@ -551,7 +551,6 @@ def build_graph(placeholders, input_shape, build_model, which_set):
 
             pred_probabilities = cfg.out_nonlinearity(net_out)
             tower_pred_probabilities.append(pred_probabilities)
-            pred = tf.argmax(pred_probabilities, axis=-1)
 
             # Loss
             if cfg.out_nonlinearity is slim.softmax:
