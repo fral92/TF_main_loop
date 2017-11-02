@@ -1065,8 +1065,9 @@ def main_loop(placeholders, val_placeholders, train_outs, train_summary_ops,
                     y_prob_batch = fetch_dict['out_act']
                     img_queue.put((cum_iter, train, x_batch, y_batch, f_batch,
                                    subset, x_batch, of_pred_fw_batch,
-                                   of_pred_bw_batch, y_pred_batch, y_pred_fw_batch,
-                                   y_pred_bw_batch, y_pred_mask_batch, blend_batch,
+                                   of_pred_bw_batch, y_pred_batch,
+                                   y_pred_fw_batch, y_pred_bw_batch,
+                                   y_pred_mask_batch, blend_batch,
                                    y_prob_batch))
 
             pbar.set_description('({:3d}) Ep {:d}'.format(cum_iter+1,
