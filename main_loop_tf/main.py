@@ -872,7 +872,7 @@ class Experiment(object):
         # Do not overwrite by default
         self._cfg_dump_dict['train_nbatches'] = self.train.nbatches
         self._cfg_dump_dict['train_nsamples'] = self.train.nsamples
-        with open(self.cfg.cfg_dump_path, 'w') as f:
+        with open(self.cfg_dump_path, 'w') as f:
             f.write(json.dumps(self._cfg_dump_dict, sort_keys=True, indent=4,
                                separators=(',', ': ')))
 
